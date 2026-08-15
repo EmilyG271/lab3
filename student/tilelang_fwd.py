@@ -190,20 +190,17 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 # Copy Q@state to shared (temp_frag layout differs from out_chunk_frag's BF16 GEMM)
                 T.copy(temp_frag, scratch_fp32)
 
-                # Fused output: scale * (exp(g) * Q@state + scores@V_new)
+                # State update prep
+                g_last = g_shared[CHUNK_SIZE - 1]
+                exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
+
+                # Fused output write + K_decay_last computation (same dims, independent)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                     if left + i < num_tokens:
                         output[bb, left + i, hh, d] = T.cast(
                             SCALE * (exp_g_shared[i] * scratch_fp32[i, d] + out_chunk_frag[i, d]),
                             dtype,
                         )
-
-                # State update: state = exp(g_last) * state + K_decay_last^T @ V_new
-                g_last = g_shared[CHUNK_SIZE - 1]
-                exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
-
-                # K_decay_last = K * exp(g_last - g)  -> BF16 (reuse kv_scratch_shared)
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     kv_scratch_shared[i, d] = T.cast(
                         T.cast(k_shared[i, d], accum_dtype)
                         * exp_g_last * inv_exp_g_shared[i],

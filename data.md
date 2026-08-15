@@ -211,3 +211,25 @@ Status: FAIL 0/8 - "local_buf must be a fragment"
 Optimization: T.gemm output directly to scratch_fp32 shared memory
 - TileLang requires T.gemm output to be a fragment, not shared memory
 - Reverted
+
+## v23b (commit 63b1727, v_beta_shared + direct W cast) - SUCCESS, MAJOR WIN
+Date: 2026-08-15
+Status: ALL PASS (8/8)
+Optimization: Decouple V_beta from kv_scratch_shared using dedicated v_beta_shared
+- T.copy(w_frag, kv_scratch_shared) with cross-dtype FP32->BF16 conversion
+- Eliminates T.copy(w_frag, scratch_fp32) + cast loop = ~64KB less traffic per chunk
+- Cost: +16KB shared (v_beta_shared), total ~225KB (under 228KB limit)
+
+| Case | v21b (ms) | v23b (ms) | vs v21b | vs baseline |
+|------|----------|-----------|--------|-------------|
+| short_tail_state | 0.256 | 0.248 | -3.1% | -45.9% |
+| chain_equal | 1.579 | 1.478 | -6.4% | -52.0% |
+| parallel_equal | 0.904 | 0.841 | -7.0% | -48.6% |
+| parallel_gva | 0.965 | 0.923 | -4.4% | -45.4% |
+| long_low_gva | 7.092 | 6.915 | -2.5% | -47.2% |
+| batch_split_gva | 5.597 | 5.446 | -2.7% | -46.7% |
+| wide_gva_state | 10.110 | 9.575 | -5.3% | -45.7% |
+| deep_gva_state | 11.671 | 10.990 | -5.8% | -46.6% |
+
+Notes: Geometric mean ~4.7% faster than v21b, ~46.6% faster than baseline.
+Key discovery: T.copy supports cross-dtype (FP32->BF16) conversion!
