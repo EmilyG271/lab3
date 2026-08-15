@@ -146,7 +146,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                     )
 
                 # K_state = K_decay @ state (replaces W=A@K_decay, saves 1 GEMM)
-                T.gemm(k_decay_shared, state_bf16, u_frag, clear_accum=True)
+                T.gemm(k_decay_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
                 T.copy(u_frag, kv_scratch_shared)
 
                 # Fused V*beta - K_state (non-tail: V in shared; saves 1 element-wise loop)
@@ -173,10 +173,10 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 T.copy(u_frag, v_new_shared)
 
                 # scores = Q @ K^T  (moved earlier for ILP overlap)
-                T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
+                T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True, k_pack=2)
 
                 # Q @ state (u_frag is now free, reuse it)
-                T.gemm(q_shared, state_bf16, u_frag, clear_accum=True)
+                T.gemm(q_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
                 for i, j in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
                     if i >= j:
                         scores_shared[i, j] = T.cast(

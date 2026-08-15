@@ -395,3 +395,37 @@ high head count suffer from shared memory bandwidth contention during pre-load.
 Reverted to v42 (83f368d).
 
 CURRENT BEST: v42 (commit 83f368d)
+
+
+## v46-v58 Summary (session 2026-08-16)
+All entries from this session. v53 is current best (commit 713e1ca).
+
+| Ver | Commit | Optimization | Result |
+|-----|--------|-------------|--------|
+| v46 | 038bb7e | State in fragment, eliminate state_shared | PASS 8/8, PREVIOUS BEST |
+| v47 | a4d8057 | Eliminate v_beta_shared, load V into v_new_shared | PASS 8/8, -0.5%, REVERTED |
+| v48 | 5597fed | TL_ENABLE_LOWER_LDGSTG_PREDICATED | PASS 8/8, neutral, REVERTED |
+| v49 | 8fac44d | Eliminate T.copy, read u_frag in V*beta | PASS 8/8, +4.6% regression, REVERTED |
+| v50 | d457229 | Move scores GEMM earlier | PASS 8/8, +1.8% regression, REVERTED |
+| v51 | 2664f3f | TIR_MERGE_STATIC_SMEM + k_pack=2 | PASS 8/8, +1.1% regression, REVERTED |
+| v52 | e7d0047 | split_v=2 for all cases | PASS 8/8, +19% regression, REVERTED |
+| v53 | 713e1ca | Adaptive split_v (split_v=2 only when B*H<=4) | PASS 8/8, -2.6% vs v46, NEW BEST |
+| v54 | 8f09a8b | T.copy for state_bf16 refresh | PASS 8/8, neutral, REVERTED |
+| v55 | 1c9cecf | GEMM reorder + output fusion | PASS 8/8, +2.1% regression, REVERTED |
+| v56 | ace5d6f | FullCol policy for K_state GEMM | PASS 8/8, neutral, REVERTED |
+| v57 | feb8c80 | Extend split_v threshold to B*H<=8 | PASS 8/8, anomalous regression in unchanged H=2 kernels, REVERTED |
+| v58 | 2d8d5f5 | Eliminate v_new_shared, use v_new_frag as GEMM B | FAILED - LayoutInference conflict between u_frag and v_new_frag, REVERTED |
+
+### v53 Baseline (confirmed, commit 713e1ca)
+| Case | v53 (ms) | vs baseline (v7) |
+|------|----------|-----------------|
+| short_tail_state | 0.154 | -66.2% |
+| chain_equal | 0.687 | -77.7% |
+| parallel_equal | 0.523 | -68.0% |
+| parallel_gva | 0.595 | -64.8% |
+| long_low_gva | 4.083 | -68.8% |
+| batch_split_gva | 3.601 | -64.7% |
+| wide_gva_state | 6.660 | -62.2% |
+| deep_gva_state | 7.272 | -64.6% |
+
+CURRENT BEST: v53 (commit 713e1ca)
