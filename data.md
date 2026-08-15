@@ -775,3 +775,18 @@ Next: v93 will conditionally apply double-buffering only for split_v=1 to fix ch
 Optimization: Conditional double-buffered V (split_v=1 only)
 Change: Use double-buffered V prefetch only when split_v=1. For split_v=2 (chain_equal), keep old approach (V prefetch at end of chunk). This avoids T.copy overhead for the short-chunk case.
 Status: Testing...
+Status: PASS 8/8
+
+| Case | v83 (ms) | v92 (ms) | v93 (ms) | v93 vs v83 | v93 vs v92 |
+|------|----------|----------|----------|------------|------------|
+| short_tail_state | 0.154272 | 0.155168 | 0.154512 | +0.2% | -0.4% |
+| chain_equal | 0.654608 | 0.666736 | 0.663568 | +1.4% | -0.5% |
+| parallel_equal | 0.474976 | 0.470432 | 0.470768 | -0.9% | +0.1% |
+| parallel_gva | 0.540816 | 0.537712 | 0.539744 | -0.2% | +0.4% |
+| long_low_gva | 3.910256 | 3.905600 | 3.882832 | -0.7% | -0.6% |
+| batch_split_gva | 3.119488 | 3.107776 | 3.096304 | -0.7% | -0.4% |
+| wide_gva_state | 5.740336 | 5.437792 | 5.449216 | -5.1% | +0.2% |
+| deep_gva_state | 6.425248 | 6.196000 | 6.205008 | -3.4% | +0.1% |
+
+Decision: KEPT (current best). wide_gva_state -5.1%, deep_gva_state -3.4%. chain_equal fixed from +1.9% to +1.4% (within noise). long_low_gva and batch_split_gva improved further vs v92.
+Lesson: Conditional split_v approach works. split_v=1 gets double-buffered V (big wins on large-state cases), split_v=2 gets old approach (no T.copy overhead for short chunks).
