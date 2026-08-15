@@ -142,3 +142,27 @@ Only 2 FP32 GEMMs remain (W@state, Q@state). All other GEMMs are now BF16.
 当前最优版本 Commit ID: df86047
 ---
 继续执行下一轮...
+## v18 (commit f077670, BF16 state GEMMs) - SUCCESS, MAJOR WIN
+Date: 2026-08-15
+Status: ALL PASS (8/8)
+Optimization: Add BF16 state copy (state_bf16) for W@state and Q@state GEMMs
+- W@state: FP32 x FP32 -> BF16 x BF16 (W cast to kv_scratch_shared BF16)
+- Q@state: FP32 x FP32 -> BF16 x BF16 (q_shared used directly, no Q cast!)
+- Eliminated Q FP32 cast loop (saved 8192 element-wise ops per chunk)
+- Added state_bf16 refresh per chunk (16384 elements)
+- Net: ALL 7 GEMMs now BF16, zero FP32 GEMMs remaining
+- Shared mem: +32KB state_bf16, total ~209KB (under 228KB limit)
+
+| Case | v17 (ms) | v18 (ms) | vs v17 | vs baseline |
+|------|----------|----------|--------|-------------|
+| short_tail_state | 0.302 | 0.267 | -11.6% | -41.7% |
+| chain_equal | 1.916 | 1.689 | -11.8% | -45.2% |
+| parallel_equal | 1.066 | 0.929 | -12.8% | -43.2% |
+| parallel_gva | 1.111 | 0.978 | -12.0% | -42.1% |
+| long_low_gva | 8.516 | 7.417 | -12.9% | -43.3% |
+| batch_split_gva | 6.589 | 5.886 | -10.7% | -42.4% |
+| wide_gva_state | 11.727 | 10.527 | -10.2% | -40.3% |
+| deep_gva_state | 13.603 | 11.787 | -13.4% | -42.7% |
+
+Notes: Geometric mean ~12% faster than v17, ~42.7% faster than baseline.
+ALL GEMMs are now BF16. Remaining optimization targets: element-wise ops, T.copy, memory access.

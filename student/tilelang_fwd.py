@@ -76,8 +76,10 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             scores_frag = T.alloc_fragment((CHUNK_SIZE, CHUNK_SIZE), dtype=accum_dtype)
             state_update_frag = T.alloc_fragment((HEAD_DIM_K, HEAD_DIM_V), dtype=accum_dtype)
 
-            # Initialize state
+            # Initialize state and BF16 copy
             T.copy(initial_state[bb, hh, :, :], state_shared)
+            for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
+                state_bf16[d1, d2] = T.cast(state_shared[d1, d2], dtype)
 
             for chunk_idx in T.serial(num_chunks):
                 left = chunk_idx * CHUNK_SIZE
@@ -117,10 +119,6 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 for i in T.Parallel(CHUNK_SIZE):
                     exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
                     inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
-
-                # Refresh BF16 state copy for GEMMs
-                for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
-                    state_bf16[d1, d2] = T.cast(state_shared[d1, d2], dtype)
 
                 # K_decay = K * beta * exp(g)  -> BF16 (for GEMM with A which is BF16)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
@@ -215,8 +213,10 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                     kv_scratch_shared, v_new_shared, state_update_frag,
                     transpose_A=True, clear_accum=True,
                 )
+                # Fused state decay + update + BF16 refresh for next chunk
                 for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
                     state_shared[d1, d2] = state_shared[d1, d2] * exp_g_last + state_update_frag[d1, d2]
+                    state_bf16[d1, d2] = T.cast(state_shared[d1, d2], dtype)
 
             # Write final state
             T.copy(state_shared, final_state[bb, hh, :, :])
