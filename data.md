@@ -25,3 +25,9 @@ Threads: 128, Shared mem: ~219KB
 | Round | Commit | Optimization | Status | Key Latency Change |
 |-------|--------|-------------|--------|-------------------|
 | 0 | 05020da | Baseline | PASS 8/8 | - |
+| 1 | 6230b2a | threads 128->256 | PASS 8/8 | ~20% faster all cases |
+
+### v8 Detail (threads=256)
+short_tail_state: 0.364ms (-20.5%), chain_equal: 2.397ms (-22.3%), parallel_equal: 1.309ms (-19.9%)
+parallel_gva: 1.369ms (-19.0%), long_low_gva: 10.301ms (-21.3%), batch_split_gva: 8.170ms (-20.0%)
+wide_gva_state: 14.217ms (-19.4%), deep_gva_state: 16.427ms (-20.1%)

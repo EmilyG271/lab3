@@ -118,16 +118,25 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                         dtype,
                     )
 
-                # V_beta = V * beta  -> BF16 (for GEMM with A)
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    if left + i < num_tokens:
+               # V_beta = V * beta  -> BF16 (for GEMM with A)
+                if right <= num_tokens:
+                    T.copy(v[bb, left:right, hh, 0:HEAD_DIM_V], v_beta_shared)
+                    for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                         v_beta_shared[i, d] = T.cast(
-                            T.cast(v[bb, left + i, hh, d], accum_dtype)
+                            T.cast(v_beta_shared[i, d], accum_dtype)
                             * beta_shared[i],
                             dtype,
                         )
-                    else:
-                        v_beta_shared[i, d] = 0
+                else:
+                    for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
+                        if left + i < num_tokens:
+                            v_beta_shared[i, d] = T.cast(
+                                T.cast(v[bb, left + i, hh, d], accum_dtype)
+                                * beta_shared[i],
+                                dtype,
+                            )
+                        else:
+                            v_beta_shared[i, d] = 0
 
                 # W = A @ K_decay  (BF16 x BF16 -> FP32 frag)
                 T.gemm(a_shared, k_decay_shared, w_frag, clear_accum=True)
