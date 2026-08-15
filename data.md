@@ -107,3 +107,38 @@ Optimization: Fused two separate output writes (output_from_state + output_in_ch
 | deep_gva_state | 15.969 | 15.793 | -1.1% | -23.2% |
 
 Notes: chain_equal and parallel_gva benefited most (>2%). Geometric mean ~1.4% vs v13, ~23% vs baseline.
+## v17 (commit df86047, BF16 v_new + scores + fuse state decay) - SUCCESS, MAJOR WIN
+Date: 2026-08-15
+Status: ALL PASS (8/8)
+Optimization: Convert v_new_shared and scores_shared from FP32 to BF16
+- scores@V_new GEMM: FP32 x FP32 -> BF16 x BF16 (tensor core ~2x faster)
+- K_decay_last^T @ V_new GEMM: FP32^T x FP32 -> BF16^T x BF16 (tensor core ~2x faster)
+- K_decay_last now uses kv_scratch_shared (BF16) instead of scratch_fp32 (FP32)
+- Fused state decay with state update (saves one pass over 128x128 state_shared)
+- Eliminated T.copy(u_frag, v_new_shared), combined subtraction+cast
+- Combined scores causal mask + dtype cast into single loop
+- Added T.copy(temp_frag, scratch_fp32) before fused output (layout conflict fix)
+- Saved 24KB shared memory (16KB v_new + 8KB scores)
+
+| Case | v16 (ms) | v17 (ms) | vs v16 | vs baseline |
+|------|----------|----------|--------|-------------|
+| short_tail_state | 0.353 | 0.302 | -14.4% | -34.1% |
+| chain_equal | 2.361 | 1.916 | -18.9% | -37.8% |
+| parallel_equal | 1.278 | 1.066 | -16.6% | -34.8% |
+| parallel_gva | 1.319 | 1.111 | -15.8% | -34.2% |
+| long_low_gva | 9.978 | 8.516 | -14.7% | -34.9% |
+| batch_split_gva | 7.670 | 6.589 | -14.1% | -35.5% |
+| wide_gva_state | 13.513 | 11.727 | -13.2% | -33.5% |
+| deep_gva_state | 15.793 | 13.603 | -13.9% | -33.9% |
+
+Notes: Geometric mean ~15.3% faster than v16, ~34.9% faster than baseline.
+Only 2 FP32 GEMMs remain (W@state, Q@state). All other GEMMs are now BF16.
+
+---
+[Report Round 13]
+时间：2026-08-15 15:36
+本轮优化方向：BF16 conversion of v_new_shared + scores_shared, fused state decay+update
+测试结果：成功 | [延迟: 0.302-13.603 ms] | [相比基线提升: ~35%]
+当前最优版本 Commit ID: df86047
+---
+继续执行下一轮...
