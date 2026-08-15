@@ -40,7 +40,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
         final_state: T.Tensor(state_shape, dtype=accum_dtype),
         num_chunks: T.int32,
     ):
-        with T.Kernel(batch_size * H, threads=256) as (block_id,):
+        with T.Kernel(batch_size * H, threads=512) as (block_id,):
             bb = block_id // H
             hh = block_id % H
             hhg = hh // (H // Hg) if H != Hg else hh

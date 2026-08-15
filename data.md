@@ -68,3 +68,20 @@ Date: 2026-08-15
 Status: TESTING
 Optimization: Precompute exp_g once, use in K_decay, output_from_state, state decay.
 Keep decay_mask and K_decay_last using T.exp2 (they involve g differences).
+
+## v11b Results (precompute exp_g only)
+Status: ALL PASS (8/8)
+
+| Case | Latency (ms) | vs v10 | vs baseline |
+|------|-------------|-------|-------------|
+| short_tail_state | 0.362 | -0.8% | -21.0% |
+| chain_equal | 2.472 | +2.3% | -19.8% |
+| parallel_equal | 1.288 | -2.1% | -21.2% |
+| parallel_gva | 1.371 | +0.7% | -18.9% |
+| long_low_gva | 10.130 | -1.7% | -22.6% |
+| batch_split_gva | 7.809 | -3.1% | -23.5% |
+| wide_gva_state | 13.816 | -2.1% | -21.6% |
+| deep_gva_state | 16.166 | -2.7% | -21.4% |
+
+Notes: Larger cases benefit more (more chunks = more exp2 savings). chain_equal slightly worse.
+Overall ~1% improvement vs v10, ~21% vs baseline.
