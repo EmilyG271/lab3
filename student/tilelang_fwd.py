@@ -137,16 +137,11 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 if right <= num_tokens:
                     T.ptx_wait_group(0)
 
-                # K_decay = K * beta * exp(g)  -> BF16 (fused beta*exp_g, saves 1 shared buffer)
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
-                    k_decay_shared[i, d] = T.cast(
-                        T.cast(k_shared[i, d], accum_dtype)
-                        * beta_shared[i] * exp_g_shared[i],
-                        dtype,
-                    )
-
-                # K_state = K_decay @ state (replaces W=A@K_decay, saves 1 GEMM)
-                T.gemm(k_decay_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
+                # K_state = K @ state (use k_shared directly, skip K_decay shared mem write)
+                T.gemm(k_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
+                # Scale by beta * exp_g (fuses K_decay into fragment, saves 1 shared mem write loop)
+                for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
+                    u_frag[i, d] = u_frag[i, d] * beta_shared[i] * exp_g_shared[i]
                 T.copy(u_frag, kv_scratch_shared)
 
                 # Fused V*beta - K_state (non-tail: V in shared; saves 1 element-wise loop)

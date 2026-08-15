@@ -558,3 +558,18 @@ CURRENT BEST: v68 (commit 2366595) - v61 + tail/non-tail output write split
 | deep_gva_state | 7.158 | 7.464 | +4.3% |
 结论：回退到 v70。原因：fragment 在 K_decay 期间保持活跃增加寄存器压力，长序列受影响最大
 教训43：不要在访问 fragment 的循环中同时写入共享内存，会增加寄存器压力
+
+## v73 (commit 38fdfa6) - 2026-08-15
+优化方向：融合 g/beta 加载与 exp_g 预计算为单个 T.Parallel 循环
+测试结果：PASS 8/8 | 噪声范围内 (±2%)
+| Case | v70 (ms) | v73 (ms) | 变化 |
+|------|----------|----------|------|
+| short_tail_state | 0.1545 | 0.1539 | -0.4% |
+| chain_equal | 0.7017 | 0.6969 | -0.7% |
+| parallel_equal | 0.5164 | 0.5210 | +0.9% |
+| parallel_gva | 0.5896 | 0.5785 | -1.9% |
+| long_low_gva | 4.066 | 4.114 | +1.2% |
+| batch_split_gva | 3.318 | 3.339 | +0.6% |
+| wide_gva_state | 6.571 | 6.628 | +0.9% |
+| deep_gva_state | 7.158 | 7.226 | +0.9% |
+结论：保留 (噪声范围内，代码更简洁)
