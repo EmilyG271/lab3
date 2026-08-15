@@ -13,6 +13,7 @@ SCALE = HEAD_DIM_K ** -0.5
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+        tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE: True,
     },
 )
 def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
