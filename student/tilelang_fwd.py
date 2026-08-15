@@ -88,8 +88,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
             # Initialize state and BF16 copy
             for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
                 state_frag[d1, d2] = initial_state[bb, hh, d1, v_offset + d2]
-            for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
-                state_bf16[d1, d2] = T.cast(state_frag[d1, d2], dtype)
+            T.copy(state_frag, state_bf16)
 
             for chunk_idx in T.serial(num_chunks):
                 left = chunk_idx * CHUNK_SIZE
@@ -229,8 +228,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 if next_right <= num_tokens:
                     T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
                 # Refresh state_bf16 from state_frag
-                for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
-                    state_bf16[d1, d2] = T.cast(state_frag[d1, d2], dtype)
+                T.copy(state_frag, state_bf16)
 
             # Write final state
             for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):

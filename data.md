@@ -573,3 +573,19 @@ CURRENT BEST: v68 (commit 2366595) - v61 + tail/non-tail output write split
 | wide_gva_state | 6.571 | 6.628 | +0.9% |
 | deep_gva_state | 7.158 | 7.226 | +0.9% |
 结论：保留 (噪声范围内，代码更简洁)
+
+## v74 (commit fcaae7e) - 2026-08-15
+优化方向：消除第一个 K_decay 计算，直接用 k_shared 做 K_state GEMM，对 u_frag 缩放 beta*exp_g
+测试结果：PASS 8/8 | chain_equal -5.2%，总延迟略降
+| Case | v70 (ms) | v74 (ms) | 变化 |
+|------|----------|----------|------|
+| short_tail_state | 0.1545 | 0.1520 | -1.6% |
+| chain_equal | 0.7017 | 0.6649 | -5.2% |
+| parallel_equal | 0.5164 | 0.5287 | +2.4% |
+| parallel_gva | 0.5896 | 0.5796 | -1.7% |
+| long_low_gva | 4.066 | 4.078 | +0.3% |
+| batch_split_gva | 3.318 | 3.351 | +1.0% |
+| wide_gva_state | 6.571 | 6.539 | -0.5% |
+| deep_gva_state | 7.158 | 7.143 | -0.2% |
+结论：保留 (chain_equal 显著改善，总延迟略降)
+教训44：消除共享内存写入循环改为 fragment 缩放对低并行度案例有效（chain_equal -5.2%）
