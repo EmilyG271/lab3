@@ -144,17 +144,12 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
 
                 # K_state = K @ state (use k_shared directly, skip K_decay shared mem write)
                 T.gemm(k_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
-                # Scale by beta * exp_g (fuses K_decay into fragment, saves 1 shared mem write loop)
-                for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
-                    u_frag[i, d] = u_frag[i, d] * beta_shared[i] * exp_g_shared[i]
-                T.copy(u_frag, kv_scratch_shared)
-
-                # Fused V*beta - K_state (non-tail: V in shared; saves 1 element-wise loop)
+                # Fused: scale K_state by beta*exp_g and compute V*beta - K_state directly
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
                         kv_scratch_shared[i, d] = T.cast(
                             T.cast(v_beta_shared[i, d], accum_dtype) * beta_shared[i]
-                            - T.cast(kv_scratch_shared[i, d], accum_dtype),
+                            - u_frag[i, d] * beta_shared[i] * exp_g_shared[i],
                             dtype,
                         )
                 else:
@@ -162,7 +157,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         if left + i < num_tokens:
                             kv_scratch_shared[i, d] = T.cast(
                                 T.cast(v[bb, left + i, hh, v_offset + d], accum_dtype) * beta_shared[i]
-                                - T.cast(kv_scratch_shared[i, d], accum_dtype),
+                                - u_frag[i, d] * beta_shared[i] * exp_g_shared[i],
                                 dtype,
                             )
                         else:

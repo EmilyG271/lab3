@@ -634,3 +634,23 @@ Register changes (from ptxas verbose):
 Decision: REVERTED (chain_equal +2.7% > threshold)
 KEY FINDING: __launch_bounds__ still specifies minBlocksPerMultiprocessor=1 even with 119 regs. 2 blocks/SM NOT achieved despite 119 < 128. Register reduction alone does not improve occupancy.
 Lesson: Need to find __launch_bounds__ setting in TileLang C++ backend to enable 2 blocks/SM. GEMM reordering disrupts pipeline for medium-sequence cases.
+
+
+## v82 (commit 8ed0d40) - 2026-08-16
+Optimization: Staggered prefetch - move Q and A async_copy earlier in pipeline
+Change: Q prefetch moved to after Q@state (last use of q_shared), A prefetch moved to after A@kv_scratch (last use of a_shared). K prefetch stays after K_decay_last. V prefetch stays after state_update GEMM. has_next flag computed once at chunk start.
+Status: PASS 8/8
+
+| Case | v77 (ms) | v82 (ms) | Change |
+|------|----------|----------|--------|
+| short_tail_state | 0.152464 | 0.151616 | -0.6% |
+| chain_equal | 0.663296 | 0.666032 | +0.4% |
+| parallel_equal | 0.513520 | 0.473664 | -7.8% |
+| parallel_gva | 0.575728 | 0.538080 | -6.5% |
+| long_low_gva | 4.056448 | 3.860160 | -4.8% |
+| batch_split_gva | 3.283520 | 3.094944 | -5.7% |
+| wide_gva_state | 6.514944 | 5.719504 | -12.2% |
+| deep_gva_state | 7.095648 | 6.389824 | -9.9% |
+
+Decision: KEPT (avg -5.9%, biggest win since v61. wide_gva_state -12.2%, deep_gva_state -9.9%)
+Lesson: Staggering async_copy prefetches to issue at each operand's last-use point gives the copy engine maximum time to complete before the next chunk's ptx_wait_group. Particularly effective for long-sequence and wide-head cases.
