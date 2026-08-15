@@ -40,7 +40,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
         final_state: T.Tensor(state_shape, dtype=accum_dtype),
         num_chunks: T.int32,
     ):
-        with T.Kernel(batch_size * H, threads=512) as (block_id,):
+        with T.Kernel(batch_size * H, threads=256) as (block_id,):
             bb = block_id // H
             hh = block_id % H
             hhg = hh // (H // Hg) if H != Hg else hh
@@ -57,6 +57,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
             # Precomputed exp(g) to avoid redundant exp2 calls
             exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
+            inv_exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
 
             # Shared BF16 scratch for K_decay then V_beta (reused, saves 16KB)
             kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
@@ -114,6 +115,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 # Precompute exp(g) once per chunk
                 for i in T.Parallel(CHUNK_SIZE):
                     exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
+                    inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
 
                 # K_decay = K * beta * exp(g)  -> BF16 (for GEMM with A which is BF16)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
@@ -173,9 +175,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
                 for i, j in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
                     if i >= j:
-                        scores_frag[i, j] = scores_frag[i, j] * T.exp2(
-                            (g_shared[i] - g_shared[j]) * LOG2E
-                        )
+                        scores_frag[i, j] = scores_frag[i, j] * exp_g_shared[i] * inv_exp_g_shared[j]
                     else:
                         scores_frag[i, j] = 0
                 T.copy(scores_frag, scores_shared)
@@ -200,7 +200,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     scratch_fp32[i, d] = (
                         T.cast(k_shared[i, d], accum_dtype)
-                        * T.exp2((g_last - g_shared[i]) * LOG2E)
+                        * exp_g_last * inv_exp_g_shared[i]
                     )
 
                 # state += K_decay_last^T @ V_new  (FP32^T x FP32 -> FP32)
