@@ -47,8 +47,8 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             hh = block_id % H
             hhg = hh // (H // Hg) if H != Hg else hh
 
-            # State persists across chunks (FP32 for accuracy)
-            state_shared = T.alloc_shared((HEAD_DIM_K, HEAD_DIM_V), dtype=accum_dtype)
+           # State persists across chunks (FP32 for accuracy)
+            state_frag = T.alloc_fragment((HEAD_DIM_K, HEAD_DIM_V), dtype=accum_dtype)
             state_bf16 = T.alloc_shared((HEAD_DIM_K, HEAD_DIM_V), dtype=dtype)
 
             # Input data in BF16
@@ -75,12 +75,12 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             u_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V), dtype=accum_dtype)
             out_chunk_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V), dtype=accum_dtype)
             scores_frag = T.alloc_fragment((CHUNK_SIZE, CHUNK_SIZE), dtype=accum_dtype)
-            state_update_frag = T.alloc_fragment((HEAD_DIM_K, HEAD_DIM_V), dtype=accum_dtype)
 
             # Initialize state and BF16 copy
-            T.copy(initial_state[bb, hh, :, :], state_shared)
             for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
-                state_bf16[d1, d2] = T.cast(state_shared[d1, d2], dtype)
+                state_frag[d1, d2] = initial_state[bb, hh, d1, d2]
+            for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
+                state_bf16[d1, d2] = T.cast(state_frag[d1, d2], dtype)
 
             for chunk_idx in T.serial(num_chunks):
                 left = chunk_idx * CHUNK_SIZE
@@ -206,18 +206,21 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                     T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
                     T.async_copy(v[bb, next_left:next_right, hh, 0:HEAD_DIM_V], v_beta_shared)
 
-                # state = exp(g_last) * state + K_decay_last^T @ V_new  (BF16^T x BF16 -> FP32)
-                T.gemm(
-                    kv_scratch_shared, v_new_shared, state_update_frag,
-                    transpose_A=True, clear_accum=True,
-                )
-                # Fused state decay + update + BF16 refresh for next chunk
+                # Scale state by exp_g_last (in registers, no shared mem traffic)
                 for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
-                    state_shared[d1, d2] = state_shared[d1, d2] * exp_g_last + state_update_frag[d1, d2]
-                    state_bf16[d1, d2] = T.cast(state_shared[d1, d2], dtype)
+                    state_frag[d1, d2] = state_frag[d1, d2] * exp_g_last
+                # state += K_decay_last^T @ V_new (accumulate onto pre-scaled state)
+                T.gemm(
+                    kv_scratch_shared, v_new_shared, state_frag,
+                    transpose_A=True, clear_accum=False,
+                )
+                # Refresh state_bf16 from state_frag
+                for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
+                    state_bf16[d1, d2] = T.cast(state_frag[d1, d2], dtype)
 
             # Write final state
-            T.copy(state_shared, final_state[bb, hh, :, :])
+            for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
+                final_state[bb, hh, d1, d2] = state_frag[d1, d2]
 
     return kernel
 
