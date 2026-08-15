@@ -370,3 +370,28 @@ Optimization: Added TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE=True to pass_config
 
 Notes: Total -0.35% vs v38. Within noise but marginally positive. chain_equal -1.7% is notable.
 Kept as new baseline since flag is free and doesn't regress any case significantly.
+
+
+## v45 (commit ec5ee41, pre-load state + clear_accum=False) - REVERTED (mixed, +0.3% total)
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Optimization: Pre-load state*exp_g_last into state_update_frag before prefetch,
+GEMM with clear_accum=False accumulates onto pre-loaded state.
+
+| Case | v42 (ms) | v45 (ms) | vs v42 |
+|------|----------|----------|--------|
+| short_tail_state | 0.179 | 0.170 | -4.9% |
+| chain_equal | 1.010 | 0.995 | -1.5% |
+| parallel_equal | 0.594 | 0.592 | -0.3% |
+| parallel_gva | 0.646 | 0.647 | +0.2% |
+| long_low_gva | 4.528 | 4.435 | -2.1% |
+| batch_split_gva | 3.833 | 3.829 | -0.1% |
+| wide_gva_state | 6.811 | 6.967 | +2.3% |
+| deep_gva_state | 7.660 | 7.799 | +1.8% |
+
+Notes: Total +0.3% vs v42. Small cases improve (short_tail -4.9%, long_low -2.1%),
+but large cases regress (wide_gva +2.3%, deep_gva +1.8%). More concurrent blocks with
+high head count suffer from shared memory bandwidth contention during pre-load.
+Reverted to v42 (83f368d).
+
+CURRENT BEST: v42 (commit 83f368d)
