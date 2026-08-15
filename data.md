@@ -589,3 +589,24 @@ CURRENT BEST: v68 (commit 2366595) - v61 + tail/non-tail output write split
 | deep_gva_state | 7.158 | 7.143 | -0.2% |
 结论：保留 (chain_equal 显著改善，总延迟略降)
 教训44：消除共享内存写入循环改为 fragment 缩放对低并行度案例有效（chain_equal -5.2%）
+
+## v76 (commit 71ce996, REVERTED) - Eliminate K_decay_last, scale V_new by inv_exp_g
+Date: 2026-08-15
+Change: Replace K_decay_last shared mem write with V_new scaling by inv_exp_g. State update GEMM uses k_shared directly. exp_g_last folded into state scaling (applied after accumulation).
+Math: state_new = exp_g_last * (state_old + K^T @ (V_new * inv_exp_g)) = exp_g_last * state_old + K_decay_last^T @ V_new
+Status: PASS 8/8 (correctness OK)
+
+| Case | v75 (ms) | v76 (ms) | Change vs v75 |
+|------|----------|----------|---------------|
+| short_tail_state | 0.153152 | 0.155488 | +1.5% |
+| chain_equal | 0.663728 | 0.665360 | +0.2% |
+| parallel_equal | 0.519360 | 0.529984 | +2.0% |
+| parallel_gva | 0.583840 | 0.593584 | +1.7% |
+| long_low_gva | 4.062736 | 4.070192 | +0.2% |
+| batch_split_gva | 3.274992 | 3.303248 | +0.9% |
+| wide_gva_state | 6.493680 | 6.526592 | +0.5% |
+| deep_gva_state | 7.097712 | 7.087296 | -0.1% |
+
+Decision: REVERTED (+0.4% avg, parallel_equal +2.0%, parallel_gva +1.7%)
+Root cause: K prefetch delayed (must wait for state update GEMM to finish using k_shared). In v75, K prefetch overlaps with GEMM via k_decay_shared alias. Eliminating k_decay_shared removes this overlap window.
+Lesson: Using k_shared directly in state update GEMM prevents early K prefetch. Would need double-buffered K (k_next_shared) to restore overlap.
