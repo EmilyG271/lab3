@@ -59,6 +59,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             # Precomputed exp(g) to avoid redundant exp2 calls
             exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
             inv_exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
+            beta_exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
 
             # Shared BF16 scratch for K_decay then V_beta (reused, saves 16KB)
             kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
@@ -119,13 +120,13 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 for i in T.Parallel(CHUNK_SIZE):
                     exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
                     inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
+                    beta_exp_g_shared[i] = beta_shared[i] * exp_g_shared[i]
 
                 # K_decay = K * beta * exp(g)  -> BF16 (for GEMM with A which is BF16)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     kv_scratch_shared[i, d] = T.cast(
                         T.cast(k_shared[i, d], accum_dtype)
-                        * beta_shared[i]
-                        * exp_g_shared[i],
+                        * beta_exp_g_shared[i],
                         dtype,
                     )
 

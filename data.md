@@ -166,3 +166,22 @@ Optimization: Add BF16 state copy (state_bf16) for W@state and Q@state GEMMs
 
 Notes: Geometric mean ~12% faster than v17, ~42.7% faster than baseline.
 ALL GEMMs are now BF16. Remaining optimization targets: element-wise ops, T.copy, memory access.
+## v19 (commit 99e7f9a, fuse state_bf16 refresh with state update) - SUCCESS
+Date: 2026-08-15
+Status: ALL PASS (8/8)
+Optimization: Moved state_bf16 refresh from start-of-chunk to end-of-chunk, fused with state update
+- Saves one pass over 128x128 state_shared per chunk
+- Initial state_bf16 cast done once before the loop
+
+| Case | v18 (ms) | v19 (ms) | vs v18 | vs baseline |
+|------|----------|----------|--------|-------------|
+| short_tail_state | 0.267 | 0.259 | -3.0% | -43.5% |
+| chain_equal | 1.689 | 1.632 | -3.4% | -47.1% |
+| parallel_equal | 0.929 | 0.928 | -0.1% | -43.3% |
+| parallel_gva | 0.978 | 0.965 | -1.3% | -42.9% |
+| long_low_gva | 7.417 | 7.156 | -3.5% | -45.3% |
+| batch_split_gva | 5.886 | 5.640 | -4.2% | -44.8% |
+| wide_gva_state | 10.527 | 10.139 | -3.7% | -42.5% |
+| deep_gva_state | 11.787 | 11.692 | -0.8% | -43.1% |
+
+Notes: Long-sequence cases benefit most (more chunks = more saved passes).
