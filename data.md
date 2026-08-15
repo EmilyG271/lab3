@@ -348,3 +348,25 @@ Optimization: Eliminate T.copy after K_state GEMM, read K_state from u_frag in s
 Notes: Total +2.2% vs v38. Confirms v36 lesson: reading from fragments in element-wise
 loops increases register pressure. Shared memory T.copy is cheap; register pressure is costly.
 Reverted to v38.
+
+
+## v41 (commit 067b393, TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE) - SUCCESS (within noise)
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Optimization: Added TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE=True to pass_configs.
+- Compiler flag to merge non-overlapping shared memory allocations
+- Could reduce total shared memory and improve occupancy
+
+| Case | v38 (ms) | v41 (ms) | vs v38 | vs baseline |
+|------|----------|----------|--------|-------------|
+| short_tail_state | 0.177 | 0.177 | ~0% | -61.4% |
+| chain_equal | 1.039 | 1.021 | -1.7% | -66.9% |
+| parallel_equal | 0.605 | 0.603 | -0.3% | -63.1% |
+| parallel_gva | 0.653 | 0.656 | +0.5% | -61.2% |
+| long_low_gva | 4.557 | 4.516 | -0.9% | -65.5% |
+| batch_split_gva | 3.871 | 3.852 | -0.5% | -62.3% |
+| wide_gva_state | 6.924 | 6.959 | +0.5% | -60.5% |
+| deep_gva_state | 7.882 | 7.834 | -0.6% | -61.9% |
+
+Notes: Total -0.35% vs v38. Within noise but marginally positive. chain_equal -1.7% is notable.
+Kept as new baseline since flag is free and doesn't regress any case significantly.
