@@ -65,7 +65,6 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             scores_shared = T.alloc_shared((CHUNK_SIZE, CHUNK_SIZE), dtype=accum_dtype)
 
             # Fragments (registers, FP32 accumulators)
-            # Each fragment used as GEMM output must have consistent layout
             w_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_K), dtype=accum_dtype)
             u_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V), dtype=accum_dtype)
             temp_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V), dtype=accum_dtype)
@@ -120,71 +119,68 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
                 # V_beta = V * beta  -> BF16 (for GEMM with A)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    v_beta_shared[i, d] = T.cast(
-                        T.cast(v[bb, left + i, hh, d], accum_dtype)
-                        * beta_shared[i] if left + i < num_tokens else 0,
-                        dtype,
-                    )
+                    if left + i < num_tokens:
+                        v_beta_shared[i, d] = T.cast(
+                            T.cast(v[bb, left + i, hh, d], accum_dtype)
+                            * beta_shared[i],
+                            dtype,
+                        )
+                    else:
+                        v_beta_shared[i, d] = 0
 
                 # W = A @ K_decay  (BF16 x BF16 -> FP32 frag)
                 T.gemm(a_shared, k_decay_shared, w_frag, clear_accum=True)
-                # Copy W to FP32 scratch for W@S GEMM
                 T.copy(w_frag, scratch_fp32)
 
                 # U = A @ V_beta  (BF16 x BF16 -> FP32 frag)
                 T.gemm(a_shared, v_beta_shared, u_frag, clear_accum=True)
+                T.copy(u_frag, v_new_shared)
 
                 # V_new = U - W @ S  (FP32 x FP32 -> FP32 frag)
                 T.gemm(scratch_fp32, state_shared, temp_frag, clear_accum=True)
-                # Use separate loops to avoid layout conflict between u_frag and temp_frag
+                T.copy(temp_frag, scratch_fp32)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    v_new_shared[i, d] = u_frag[i, d]
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    v_new_shared[i, d] = v_new_shared[i, d] - temp_frag[i, d]
+                    v_new_shared[i, d] = v_new_shared[i, d] - scratch_fp32[i, d]
 
                 # output_from_state = scale * exp(g) * (Q @ S)
-                # Need Q in FP32 for GEMM with state (FP32)
-                # Reuse scratch_fp32 (W no longer needed)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     scratch_fp32[i, d] = T.cast(q_shared[i, d], accum_dtype)
                 T.gemm(scratch_fp32, state_shared, temp_frag, clear_accum=True)
+                T.copy(temp_frag, scratch_fp32)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    temp_frag[i, d] = SCALE * T.exp2(g_shared[i] * LOG2E) * temp_frag[i, d]
+                    if left + i < num_tokens:
+                        output[bb, left + i, hh, d] = T.cast(
+                            SCALE * T.exp2(g_shared[i] * LOG2E) * scratch_fp32[i, d], dtype
+                        )
 
                 # scores = Q @ K^T  (BF16 x BF16 -> FP32 frag)
                 T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
-                # Apply decay mask
                 for i, j in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
                     if i >= j:
                         scores_frag[i, j] = scores_frag[i, j] * T.exp2(
-                        (g_shared[i] - g_shared[j]) * LOG2E)
+                            (g_shared[i] - g_shared[j]) * LOG2E
+                        )
                     else:
                         scores_frag[i, j] = 0
                 T.copy(scores_frag, scores_shared)
 
                 # output_in_chunk = scale * (scores * decay) @ V_new  (FP32 x FP32)
                 T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
-
-                # Write output in two steps to avoid layout conflict between temp_frag and out_chunk_frag
-                # Step 1: write out_state (temp_frag) to output
+                T.copy(out_chunk_frag, scratch_fp32)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                     if left + i < num_tokens:
-                        output[bb, left + i, hh, d] = T.cast(temp_frag[i, d], dtype)
-                # Step 2: add scaled out_chunk (out_chunk_frag) to output
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    if left + i < num_tokens:
-                        output[bb, left + i, hh, d] = output[bb, left + i, hh, d] + T.cast(SCALE * out_chunk_frag[i, d], dtype)
+                        output[bb, left + i, hh, d] = output[bb, left + i, hh, d] + T.cast(
+                            SCALE * scratch_fp32[i, d], dtype
+                        )
 
                 # State update: state = exp(g_last) * state + K_decay_last^T @ V_new
                 g_last = g_shared[CHUNK_SIZE - 1]
                 exp_g_last = T.exp2(g_last * LOG2E)
 
-                # Scale state
                 for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
                     state_shared[d1, d2] = state_shared[d1, d2] * exp_g_last
 
-                # K_decay_last = K * exp(g_last - g)  -> FP32 (for GEMM with V_new FP32)
-                # Reuse scratch_fp32 (Q no longer needed)
+                # K_decay_last = K * exp(g_last - g)  -> FP32 (reuse scratch_fp32)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     scratch_fp32[i, d] = (
                         T.cast(k_shared[i, d], accum_dtype)
@@ -217,6 +213,10 @@ def gdn_prefill_forward(
     batch_size, num_tokens, num_heads_qk, _ = q.shape
     num_heads_v = v.shape[2]
     num_chunks = tilelang.cdiv(num_tokens, CHUNK_SIZE)
+
+    # Expand Q heads for GVA (one Q/K head maps to multiple V heads)
+    if num_heads_qk != num_heads_v:
+        q = q.repeat_interleave(num_heads_v // num_heads_qk, dim=2)
 
     if initial_state is None:
         initial_state = torch.zeros(
