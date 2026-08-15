@@ -159,17 +159,11 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 T.copy(temp_frag, scratch_fp32)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                     v_new_shared[i, d] = v_new_shared[i, d] - scratch_fp32[i, d]
-
                 # output_from_state = scale * exp(g) * (Q @ S)
+                # Q @ state (result kept in temp_frag, no global write yet)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     scratch_fp32[i, d] = T.cast(q_shared[i, d], accum_dtype)
                 T.gemm(scratch_fp32, state_shared, temp_frag, clear_accum=True)
-                T.copy(temp_frag, scratch_fp32)
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    if left + i < num_tokens:
-                        output[bb, left + i, hh, d] = T.cast(
-                            SCALE * exp_g_shared[i] * scratch_fp32[i, d], dtype
-                        )
 
                 # scores = Q @ K^T  (BF16 x BF16 -> FP32 frag)
                 T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
@@ -180,13 +174,15 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                         scores_frag[i, j] = 0
                 T.copy(scores_frag, scores_shared)
 
-                # output_in_chunk = scale * (scores * decay) @ V_new  (FP32 x FP32)
+                # output_in_chunk = scores @ V_new  (FP32 x FP32 -> FP32 frag)
                 T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
-                T.copy(out_chunk_frag, scratch_fp32)
+
+                # Fused output: scale * (exp(g) * Q@state + scores@V_new)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                     if left + i < num_tokens:
-                        output[bb, left + i, hh, d] = output[bb, left + i, hh, d] + T.cast(
-                            SCALE * scratch_fp32[i, d], dtype
+                        output[bb, left + i, hh, d] = T.cast(
+                            SCALE * (exp_g_shared[i] * temp_frag[i, d] + out_chunk_frag[i, d]),
+                            dtype,
                         )
 
                 # State update: state = exp(g_last) * state + K_decay_last^T @ V_new
