@@ -204,3 +204,10 @@ Optimization: Precompute beta * exp_g into beta_exp_g_shared, use in K_decay
 | deep_gva_state | 11.692 | 11.619 | -0.6% | -43.5% |
 
 Notes: Geometric mean ~0.9% improvement. Some cases >2% faster, one case slightly slower (noise).
+
+## v23 (commit 0cbd94c, GEMM output to shared) - FAIL (compile error)
+Date: 2026-08-15
+Status: FAIL 0/8 - "local_buf must be a fragment"
+Optimization: T.gemm output directly to scratch_fp32 shared memory
+- TileLang requires T.gemm output to be a fragment, not shared memory
+- Reverted

@@ -61,8 +61,10 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             inv_exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
             beta_exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
 
-            # Shared BF16 scratch for K_decay then V_beta (reused, saves 16KB)
+            # Shared BF16 scratch for K_decay then W (reused, saves 16KB)
             kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
+            # Dedicated V_beta buffer (decouples from kv_scratch_shared)
+            v_beta_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_V), dtype=dtype)
 
             # FP32 scratch for GEMMs with state (both FP32)
             scratch_fp32 = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=accum_dtype)
@@ -132,36 +134,33 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
                 # W = A @ K_decay  (BF16 x BF16 -> FP32 frag)
                 T.gemm(a_shared, kv_scratch_shared, w_frag, clear_accum=True)
-                T.copy(w_frag, scratch_fp32)
+                # Cast W to BF16 in kv_scratch_shared (K_decay no longer needed)
+                T.copy(w_frag, kv_scratch_shared)
 
-                # V_beta = V * beta  -> BF16 (reuse kv_scratch_shared, K_decay no longer needed)
+                # V_beta = V * beta  -> BF16 (dedicated buffer, kv_scratch has W)
                 if right <= num_tokens:
-                    T.copy(v[bb, left:right, hh, 0:HEAD_DIM_V], kv_scratch_shared)
+                    T.copy(v[bb, left:right, hh, 0:HEAD_DIM_V], v_beta_shared)
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                        kv_scratch_shared[i, d] = T.cast(
-                            T.cast(kv_scratch_shared[i, d], accum_dtype)
+                        v_beta_shared[i, d] = T.cast(
+                            T.cast(v_beta_shared[i, d], accum_dtype)
                             * beta_shared[i],
                             dtype,
                         )
                 else:
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                         if left + i < num_tokens:
-                            kv_scratch_shared[i, d] = T.cast(
+                            v_beta_shared[i, d] = T.cast(
                                 T.cast(v[bb, left + i, hh, d], accum_dtype)
                                 * beta_shared[i],
                                 dtype,
                             )
                         else:
-                            kv_scratch_shared[i, d] = 0
+                            v_beta_shared[i, d] = 0
 
                 # U = A @ V_beta  (BF16 x BF16 -> FP32 frag, keep in u_frag)
-                T.gemm(a_shared, kv_scratch_shared, u_frag, clear_accum=True)
+                T.gemm(a_shared, v_beta_shared, u_frag, clear_accum=True)
 
-                # Cast W to BF16 (reuse kv_scratch_shared, V_beta no longer needed)
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
-                    kv_scratch_shared[i, d] = T.cast(scratch_fp32[i, d], dtype)
-
-                # V_new GEMM: W @ state  (BF16 x BF16 -> FP32 frag)
+                # V_new GEMM: W @ state  (BF16 x BF16 -> FP32 frag, W already in kv_scratch_shared)
                 T.gemm(kv_scratch_shared, state_bf16, temp_frag, clear_accum=True)
 
                 # scores = Q @ K^T  (moved earlier for ILP overlap)
