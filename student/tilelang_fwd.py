@@ -65,7 +65,6 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
             # Precomputed exp(g) to avoid redundant exp2 calls
             exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
             inv_exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
-            beta_exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
 
             # K_decay/K_decay_last + K_state/V_beta scratch
             if split_v > 1:
@@ -132,17 +131,16 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 for i in T.Parallel(CHUNK_SIZE):
                     exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
                     inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
-                    beta_exp_g_shared[i] = beta_shared[i] * exp_g_shared[i]
 
                 # Wait for async global memory loads (non-tail case only)
                 if right <= num_tokens:
                     T.ptx_wait_group(0)
 
-                # K_decay = K * beta * exp(g)  -> BF16 (for GEMM with A which is BF16)
+                # K_decay = K * beta * exp(g)  -> BF16 (fused beta*exp_g, saves 1 shared buffer)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     k_decay_shared[i, d] = T.cast(
                         T.cast(k_shared[i, d], accum_dtype)
-                        * beta_exp_g_shared[i],
+                        * beta_shared[i] * exp_g_shared[i],
                         dtype,
                     )
 
@@ -191,7 +189,6 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
 
                 # State update prep
-                g_last = g_shared[CHUNK_SIZE - 1]
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
 
                 # Output write (non-tail: no bounds check, tail: with bounds check)

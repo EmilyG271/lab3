@@ -533,3 +533,12 @@ Discovered full PassConfigKey list. Key new options:
 - T.warp_reduce_sum, T.tvm_warp_shuffle (warp-level operations)
 - TIR_DISABLE_CSE, TL_SIMPLIFY_ENABLE_LET_INLINE, TL_STORAGE_REWRITE_DETECT_INPLACE
 - TL_DISABLE_LOOP_UNSWITCHING, TL_LOOP_UNSWITCHING_ALLOW_NON_TRIVIAL_ELSE
+
+## v69 (commit 23e77ae, TL_STORAGE_REWRITE_DETECT_INPLACE=True) - REVERTED (neutral)
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Optimization: Added TL_STORAGE_REWRITE_DETECT_INPLACE pass config to detect in-place operations.
+Average: +0.0% vs v61, +0.2% vs v68. Mixed results, no consistent improvement.
+Reverted to keep v68 as baseline.
+
+CURRENT BEST: v68 (commit 2366595) - v61 + tail/non-tail output write split
