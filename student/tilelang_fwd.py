@@ -77,7 +77,8 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
             # V_beta buffer
             v_beta_shared = T.alloc_shared((CHUNK_SIZE, head_dim_v_split), dtype=dtype)
 
-            v_new_shared = T.alloc_shared((CHUNK_SIZE, head_dim_v_split), dtype=dtype)
+            # Alias v_new_shared with v_beta_shared (v_beta_shared is free after V*beta loop)
+            v_new_shared = v_beta_shared
             scores_shared = T.alloc_shared((CHUNK_SIZE, CHUNK_SIZE), dtype=dtype)
 
             # Fragments (registers, FP32 accumulators)
@@ -208,14 +209,13 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         dtype,
                     )
 
-                # Prefetch next chunk's data (overlaps with state_update GEMM + state update)
+                # Prefetch Q/K/A (V deferred to after state_update since v_new_shared aliases v_beta_shared)
                 next_left = (chunk_idx + 1) * CHUNK_SIZE
                 next_right = next_left + CHUNK_SIZE
                 if next_right <= num_tokens:
                     T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
                     T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_shared)
                     T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
-                    T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
 
                 # Scale state by exp_g_last (in registers, no shared mem traffic)
                 for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
@@ -225,6 +225,9 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                     k_decay_shared, v_new_shared, state_frag,
                     transpose_A=True, clear_accum=False,
                 )
+                # Prefetch V (deferred to after state_update since v_new_shared aliases v_beta_shared)
+                if next_right <= num_tokens:
+                    T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
                 # Refresh state_bf16 from state_frag
                 for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
                     state_bf16[d1, d2] = T.cast(state_frag[d1, d2], dtype)
