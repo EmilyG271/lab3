@@ -174,7 +174,11 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                         )
 
                 # State update: state = exp(g_last) * state + K_decay_last^T @ V_new
-                g_last = g_shared[CHUNK_SIZE - 1]
+                # Tail chunk: use last valid token's cumsum, not padded position
+                if right <= num_tokens:
+                    g_last = g_shared[CHUNK_SIZE - 1]
+                else:
+                    g_last = g_shared[num_tokens - left - 1]
                 exp_g_last = T.exp2(g_last * LOG2E)
 
                 for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
