@@ -136,8 +136,11 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
                 # V_new = U - W @ S  (FP32 x FP32 -> FP32 frag)
                 T.gemm(scratch_fp32, state_shared, temp_frag, clear_accum=True)
+                # Use separate loops to avoid layout conflict between u_frag and temp_frag
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    v_new_shared[i, d] = u_frag[i, d] - temp_frag[i, d]
+                    v_new_shared[i, d] = u_frag[i, d]
+                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
+                    v_new_shared[i, d] = v_new_shared[i, d] - temp_frag[i, d]
 
                 # output_from_state = scale * exp(g) * (Q @ S)
                 # Need Q in FP32 for GEMM with state (FP32)
@@ -161,13 +164,16 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
                 # output_in_chunk = scale * (scores * decay) @ V_new  (FP32 x FP32)
                 T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    temp_frag[i, d] = temp_frag[i, d] + SCALE * out_chunk_frag[i, d]
 
-                # Write output (BF16)
+                # Write output in two steps to avoid layout conflict between temp_frag and out_chunk_frag
+                # Step 1: write out_state (temp_frag) to output
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                     if left + i < num_tokens:
                         output[bb, left + i, hh, d] = T.cast(temp_frag[i, d], dtype)
+                # Step 2: add scaled out_chunk (out_chunk_frag) to output
+                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
+                    if left + i < num_tokens:
+                        output[bb, left + i, hh, d] = output[bb, left + i, hh, d] + T.cast(SCALE * out_chunk_frag[i, d], dtype)
 
                 # State update: state = exp(g_last) * state + K_decay_last^T @ V_new
                 g_last = g_shared[CHUNK_SIZE - 1]
