@@ -65,9 +65,11 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             scores_shared = T.alloc_shared((CHUNK_SIZE, CHUNK_SIZE), dtype=accum_dtype)
 
             # Fragments (registers, FP32 accumulators)
+            # Each fragment used as GEMM output must have consistent layout
             w_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_K), dtype=accum_dtype)
             u_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V), dtype=accum_dtype)
             temp_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V), dtype=accum_dtype)
+            out_chunk_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V), dtype=accum_dtype)
             scores_frag = T.alloc_fragment((CHUNK_SIZE, CHUNK_SIZE), dtype=accum_dtype)
             state_update_frag = T.alloc_fragment((HEAD_DIM_K, HEAD_DIM_V), dtype=accum_dtype)
 
@@ -158,9 +160,9 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 T.copy(scores_frag, scores_shared)
 
                 # output_in_chunk = scale * (scores * decay) @ V_new  (FP32 x FP32)
-                T.gemm(scores_shared, v_new_shared, u_frag, clear_accum=True)
+                T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    temp_frag[i, d] = temp_frag[i, d] + SCALE * u_frag[i, d]
+                    temp_frag[i, d] = temp_frag[i, d] + SCALE * out_chunk_frag[i, d]
 
                 # Write output (BF16)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
