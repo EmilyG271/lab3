@@ -7,6 +7,7 @@ HOST = "clusters.zju.edu.cn"
 PORT = "443"
 SSH_BASE = [
     "ssh", "-p", PORT,
+    "-4",
     "-o", "StrictHostKeyChecking=no",
     "-o", "ConnectTimeout=30",
     "-o", "ServerAliveInterval=30",
