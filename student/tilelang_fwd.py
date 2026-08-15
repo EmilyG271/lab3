@@ -55,6 +55,9 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
             beta_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
 
+            # Precomputed exp(g) to avoid redundant exp2 calls
+            exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
+
             # Shared BF16 scratch for K_decay then V_beta (reused, saves 16KB)
             kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
 
@@ -108,12 +111,16 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                             g_shared[i] = g_cumsum[bb, num_tokens - 1, hh]
                             beta_shared[i] = 0
 
+                # Precompute exp(g) once per chunk
+                for i in T.Parallel(CHUNK_SIZE):
+                    exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
+
                 # K_decay = K * beta * exp(g)  -> BF16 (for GEMM with A which is BF16)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     kv_scratch_shared[i, d] = T.cast(
                         T.cast(k_shared[i, d], accum_dtype)
                         * beta_shared[i]
-                        * T.exp2(g_shared[i] * LOG2E),
+                        * exp_g_shared[i],
                         dtype,
                     )
 
@@ -159,7 +166,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                     if left + i < num_tokens:
                         output[bb, left + i, hh, d] = T.cast(
-                            SCALE * T.exp2(g_shared[i] * LOG2E) * scratch_fp32[i, d], dtype
+                            SCALE * exp_g_shared[i] * scratch_fp32[i, d], dtype
                         )
 
                 # scores = Q @ K^T  (BF16 x BF16 -> FP32 frag)
@@ -184,7 +191,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
                 # State update: state = exp(g_last) * state + K_decay_last^T @ V_new
                 g_last = g_shared[CHUNK_SIZE - 1]
-                exp_g_last = T.exp2(g_last * LOG2E)
+                exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
 
                 for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
                     state_shared[d1, d2] = state_shared[d1, d2] * exp_g_last
