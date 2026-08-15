@@ -6,8 +6,6 @@ import tilelang.language as T
 CHUNK_SIZE = 64
 HEAD_DIM_K = 128
 HEAD_DIM_V = 128
-SPLIT_V = 2
-HEAD_DIM_V_SPLIT = HEAD_DIM_V // SPLIT_V
 LOG2E = 1.4426950408889634
 SCALE = HEAD_DIM_K ** -0.5
 
@@ -19,7 +17,8 @@ SCALE = HEAD_DIM_K ** -0.5
         tilelang.PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True,
     },
 )
-def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
+def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
+    head_dim_v_split = HEAD_DIM_V // split_v
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
 
@@ -44,17 +43,17 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
         final_state: T.Tensor(state_shape, dtype=accum_dtype),
         num_chunks: T.int32,
     ):
-        with T.Kernel(batch_size * H * SPLIT_V, threads=256) as (block_id,):
-            bb = block_id // (H * SPLIT_V)
-            rest = block_id % (H * SPLIT_V)
-            hh = rest // SPLIT_V
-            vv = rest % SPLIT_V
-            v_offset = vv * HEAD_DIM_V_SPLIT
+        with T.Kernel(batch_size * H * split_v, threads=256) as (block_id,):
+            bb = block_id // (H * split_v)
+            rest = block_id % (H * split_v)
+            hh = rest // split_v
+            vv = rest % split_v
+            v_offset = vv * head_dim_v_split
             hhg = hh // (H // Hg) if H != Hg else hh
 
            # State persists across chunks (FP32 for accuracy)
-            state_frag = T.alloc_fragment((HEAD_DIM_K, HEAD_DIM_V_SPLIT), dtype=accum_dtype)
-            state_bf16 = T.alloc_shared((HEAD_DIM_K, HEAD_DIM_V_SPLIT), dtype=dtype)
+            state_frag = T.alloc_fragment((HEAD_DIM_K, head_dim_v_split), dtype=accum_dtype)
+            state_bf16 = T.alloc_shared((HEAD_DIM_K, head_dim_v_split), dtype=dtype)
 
             # Input data in BF16
             q_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
@@ -68,25 +67,28 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             inv_exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
             beta_exp_g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
 
-            # K_decay/K_decay_last buffer (needs full HEAD_DIM_K columns)
-            k_decay_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
-            # Scratch for K_state, V_beta-K_state, V_new GEMM input (V_SPLIT columns)
-            kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_V_SPLIT), dtype=dtype)
-            # V_beta buffer (V_SPLIT columns)
-            v_beta_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_V_SPLIT), dtype=dtype)
+            # K_decay/K_decay_last + K_state/V_beta scratch
+            if split_v > 1:
+                k_decay_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
+                kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, head_dim_v_split), dtype=dtype)
+            else:
+                kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
+                k_decay_shared = kv_scratch_shared
+            # V_beta buffer
+            v_beta_shared = T.alloc_shared((CHUNK_SIZE, head_dim_v_split), dtype=dtype)
 
-            v_new_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_V_SPLIT), dtype=dtype)
+            v_new_shared = T.alloc_shared((CHUNK_SIZE, head_dim_v_split), dtype=dtype)
             scores_shared = T.alloc_shared((CHUNK_SIZE, CHUNK_SIZE), dtype=dtype)
 
             # Fragments (registers, FP32 accumulators)
-            u_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V_SPLIT), dtype=accum_dtype)
-            out_chunk_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V_SPLIT), dtype=accum_dtype)
+            u_frag = T.alloc_fragment((CHUNK_SIZE, head_dim_v_split), dtype=accum_dtype)
+            out_chunk_frag = T.alloc_fragment((CHUNK_SIZE, head_dim_v_split), dtype=accum_dtype)
             scores_frag = T.alloc_fragment((CHUNK_SIZE, CHUNK_SIZE), dtype=accum_dtype)
 
             # Initialize state and BF16 copy
-            for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V_SPLIT):
+            for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
                 state_frag[d1, d2] = initial_state[bb, hh, d1, v_offset + d2]
-            for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V_SPLIT):
+            for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
                 state_bf16[d1, d2] = T.cast(state_frag[d1, d2], dtype)
 
             for chunk_idx in T.serial(num_chunks):
@@ -99,7 +101,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                         T.async_copy(q[bb, left:right, hh, 0:HEAD_DIM_K], q_shared)
                         T.async_copy(k[bb, left:right, hhg, 0:HEAD_DIM_K], k_shared)
                         T.async_copy(A[bb, left:right, hh, 0:CHUNK_SIZE], a_shared)
-                        T.async_copy(v[bb, left:right, hh, v_offset:v_offset + HEAD_DIM_V_SPLIT], v_beta_shared)
+                        T.async_copy(v[bb, left:right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
                     for i in T.Parallel(CHUNK_SIZE):
                         g_shared[i] = g_cumsum[bb, left + i, hh]
                         beta_shared[i] = beta[bb, left + i, hh]
@@ -149,14 +151,14 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
                 # Fused V*beta - K_state (non-tail: V in shared; saves 1 element-wise loop)
                 if right <= num_tokens:
-                    for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V_SPLIT):
+                    for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
                         kv_scratch_shared[i, d] = T.cast(
                             T.cast(v_beta_shared[i, d], accum_dtype) * beta_shared[i]
                             - T.cast(kv_scratch_shared[i, d], accum_dtype),
                             dtype,
                         )
                 else:
-                    for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V_SPLIT):
+                    for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
                         if left + i < num_tokens:
                             kv_scratch_shared[i, d] = T.cast(
                                 T.cast(v[bb, left + i, hh, v_offset + d], accum_dtype) * beta_shared[i]
@@ -191,8 +193,8 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 g_last = g_shared[CHUNK_SIZE - 1]
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
 
-                # Output write (V_SPLIT columns)
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V_SPLIT):
+                # Output write (head_dim_v_split columns)
+                for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
                     if left + i < num_tokens:
                         output[bb, left + i, hh, v_offset + d] = T.cast(
                             SCALE * (exp_g_shared[i] * u_frag[i, d] + out_chunk_frag[i, d]),
@@ -213,10 +215,10 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                     T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
                     T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_shared)
                     T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
-                    T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + HEAD_DIM_V_SPLIT], v_beta_shared)
+                    T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
 
                 # Scale state by exp_g_last (in registers, no shared mem traffic)
-                for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V_SPLIT):
+                for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
                     state_frag[d1, d2] = state_frag[d1, d2] * exp_g_last
                 # state += K_decay_last^T @ V_new (accumulate onto pre-scaled state)
                 T.gemm(
@@ -224,11 +226,11 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                     transpose_A=True, clear_accum=False,
                 )
                 # Refresh state_bf16 from state_frag
-                for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V_SPLIT):
+                for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
                     state_bf16[d1, d2] = T.cast(state_frag[d1, d2], dtype)
 
             # Write final state
-            for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V_SPLIT):
+            for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
                 final_state[bb, hh, d1, v_offset + d2] = state_frag[d1, d2]
 
     return kernel
@@ -271,9 +273,11 @@ def gdn_prefill_forward(
         device=q.device,
     )
 
+    split_v = 2 if batch_size * num_heads_v <= 4 else 1
     kernel = _gdn_prefill_kernel(
         num_heads_v,
         num_heads_qk,
+        split_v,
         dtype="bfloat16",
         accum_dtype="float32",
     )
