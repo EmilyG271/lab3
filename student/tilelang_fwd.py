@@ -95,6 +95,11 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 left = chunk_idx * CHUNK_SIZE
                 right = left + CHUNK_SIZE
 
+                # Compute next chunk bounds early for staggered prefetches
+                next_left = (chunk_idx + 1) * CHUNK_SIZE
+                next_right = next_left + CHUNK_SIZE
+                has_next = next_right <= num_tokens
+
                 # Load chunk data with tail handling
                 if right <= num_tokens:
                     if chunk_idx == 0:
@@ -167,11 +172,19 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 T.gemm(a_shared, kv_scratch_shared, u_frag, clear_accum=True)
                 T.copy(u_frag, v_new_shared)
 
+                # Prefetch A for next chunk (a_shared is now free)
+                if has_next:
+                    T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
+
                 # scores = Q @ K^T  (moved earlier for ILP overlap)
                 T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True, k_pack=2)
 
                 # Q @ state (u_frag is now free, reuse it)
                 T.gemm(q_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
+                # Prefetch Q for next chunk (q_shared is now free)
+                if has_next:
+                    T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
+
                 for i, j in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
                     if i >= j:
                         scores_shared[i, j] = T.cast(
@@ -207,15 +220,11 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         T.cast(k_shared[i, d], accum_dtype)
                         * exp_g_last * inv_exp_g_shared[i],
                         dtype,
-                    )
+                   )
 
-                # Prefetch Q/K/A (V deferred to after state_update since v_new_shared aliases v_beta_shared)
-                next_left = (chunk_idx + 1) * CHUNK_SIZE
-                next_right = next_left + CHUNK_SIZE
-                if next_right <= num_tokens:
-                    T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
+                # Prefetch K only (Q and A already prefetched earlier in pipeline)
+                if has_next:
                     T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_shared)
-                    T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
 
                 # Scale state by exp_g_last (in registers, no shared mem traffic)
                 for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
@@ -226,8 +235,8 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                     transpose_A=True, clear_accum=False,
                 )
                 # Prefetch V (deferred to after state_update since v_new_shared aliases v_beta_shared)
-                if next_right <= num_tokens:
-                    T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
+                if has_next:
+                   T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
                 # Refresh state_bf16 from state_frag
                 T.copy(state_frag, state_bf16)
 

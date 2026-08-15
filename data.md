@@ -610,3 +610,27 @@ Status: PASS 8/8 (correctness OK)
 Decision: REVERTED (+0.4% avg, parallel_equal +2.0%, parallel_gva +1.7%)
 Root cause: K prefetch delayed (must wait for state update GEMM to finish using k_shared). In v75, K prefetch overlaps with GEMM via k_decay_shared alias. Eliminating k_decay_shared removes this overlap window.
 Lesson: Using k_shared directly in state update GEMM prevents early K prefetch. Would need double-buffered K (k_next_shared) to restore overlap.
+
+## v81 (commit 8f3638d, REVERTED) - Reorder scores masking before Q@state
+Date: 2026-08-15
+Change: Move scores * decay_mask loop before Q @ state GEMM. Goal: free scores_frag registers before u_frag allocation.
+Status: PASS 8/8
+
+Register changes (from ptxas verbose):
+- split_v=1: 178 -> 176 regs (reduced by 2)
+- split_v=2: 138 -> 119 regs (reduced by 19, below 128!)
+
+| Case | v77 (ms) | v81 (ms) | Change | split_v |
+|------|----------|----------|--------|---------|
+| short_tail_state | 0.152464 | 0.152384 | -0.1% | 2 |
+| chain_equal | 0.663296 | 0.681136 | +2.7% | 2 |
+| parallel_equal | 0.513520 | 0.517984 | +0.9% | 1 |
+| parallel_gva | 0.575728 | 0.577056 | +0.2% | 1 |
+| long_low_gva | 4.056448 | 4.020080 | -0.9% | 2 |
+| batch_split_gva | 3.283520 | 3.297280 | +0.4% | 1 |
+| wide_gva_state | 6.514944 | 6.496288 | -0.3% | 1 |
+| deep_gva_state | 7.095648 | 7.084560 | -0.2% | 1 |
+
+Decision: REVERTED (chain_equal +2.7% > threshold)
+KEY FINDING: __launch_bounds__ still specifies minBlocksPerMultiprocessor=1 even with 119 regs. 2 blocks/SM NOT achieved despite 119 < 128. Register reduction alone does not improve occupancy.
+Lesson: Need to find __launch_bounds__ setting in TileLang C++ backend to enable 2 blocks/SM. GEMM reordering disrupts pipeline for medium-sequence cases.
