@@ -136,9 +136,10 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
                 # V_beta = V * beta  -> BF16 (reuse kv_scratch_shared, K_decay no longer needed)
                 if right <= num_tokens:
+                    T.copy(v[bb, left:right, hh, 0:HEAD_DIM_V], kv_scratch_shared)
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                         kv_scratch_shared[i, d] = T.cast(
-                            T.cast(v[bb, left + i, hh, d], accum_dtype)
+                            T.cast(kv_scratch_shared[i, d], accum_dtype)
                             * beta_shared[i],
                             dtype,
                         )
