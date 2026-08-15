@@ -429,3 +429,62 @@ All entries from this session. v53 is current best (commit 713e1ca).
 | deep_gva_state | 7.272 | -64.6% |
 
 CURRENT BEST: v53 (commit 713e1ca)
+
+
+## v59 (commit b972a04, k_pack=2 for K=128 GEMMs) - KEPT (marginally positive)
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Optimization: k_pack=2 for K_state, scores, Q@state GEMMs (K dimension = 128).
+
+| Case | v53 (ms) | v59 (ms) | vs v53 |
+|------|----------|----------|--------|
+| short_tail_state | 0.154 | 0.153 | -0.9% |
+| chain_equal | 0.687 | 0.678 | -1.3% |
+| parallel_equal | 0.523 | 0.519 | -0.9% |
+| parallel_gva | 0.595 | 0.590 | -0.8% |
+| long_low_gva | 4.083 | 4.114 | +0.7% |
+| batch_split_gva | 3.601 | 3.539 | -1.7% |
+| wide_gva_state | 6.660 | 6.696 | +0.5% |
+| deep_gva_state | 7.272 | 7.315 | +0.6% |
+
+Average: -0.5% vs v53. Within noise but marginally positive. batch_split_gva and chain_equal improved most.
+
+## v60 (commit 45b77de, k_pack=2 for state_update GEMM) - REVERTED (regression)
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Optimization: k_pack=2 for state_update GEMM (K=64, transpose_A=True).
+
+| Case | v59 (ms) | v60 (ms) | vs v59 |
+|------|----------|----------|--------|
+| short_tail_state | 0.153 | 0.154 | +1.2% |
+| chain_equal | 0.678 | 0.694 | +2.3% |
+| parallel_equal | 0.519 | 0.524 | +1.0% |
+| parallel_gva | 0.590 | 0.599 | +1.5% |
+| long_low_gva | 4.114 | 4.089 | -0.6% |
+| batch_split_gva | 3.539 | 3.530 | -0.3% |
+| wide_gva_state | 6.696 | 6.667 | -0.4% |
+| deep_gva_state | 7.315 | 7.279 | -0.4% |
+
+Average: +0.5% vs v59. k_pack=2 hurts K=64 GEMMs. Reverted to v59 (b972a04).
+
+## v61 (commit b1ac803, alias v_new_shared with v_beta_shared + defer V prefetch) - SUCCESS, NEW BEST
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Optimization: Alias v_new_shared with v_beta_shared (saves 16KB shared memory).
+V prefetch moved after state_update GEMM to avoid clobbering v_new_shared.
+Q/K/A prefetch stays before state scale (overlaps with state_update GEMM).
+
+| Case | v53 (ms) | v61 (ms) | vs v53 |
+|------|----------|----------|--------|
+| short_tail_state | 0.154 | 0.154 | -0.3% |
+| chain_equal | 0.687 | 0.675 | -1.8% |
+| parallel_equal | 0.523 | 0.519 | -0.9% |
+| parallel_gva | 0.595 | 0.585 | -1.6% |
+| long_low_gva | 4.083 | 4.121 | +0.9% |
+| batch_split_gva | 3.601 | 3.349 | -7.0% |
+| wide_gva_state | 6.660 | 6.571 | -1.3% |
+| deep_gva_state | 7.272 | 7.181 | -1.2% |
+
+Average: -1.65% vs v53. Major win: batch_split_gva -7.0%. Shared memory reduced from ~129KB to ~113KB.
+
+CURRENT BEST: v61 (commit b1ac803)
