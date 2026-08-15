@@ -87,10 +87,11 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
                 # Load chunk data with tail handling
                 if right <= num_tokens:
-                    T.async_copy(q[bb, left:right, hh, 0:HEAD_DIM_K], q_shared)
-                    T.async_copy(k[bb, left:right, hhg, 0:HEAD_DIM_K], k_shared)
-                    T.async_copy(A[bb, left:right, hh, 0:CHUNK_SIZE], a_shared)
-                    T.async_copy(v[bb, left:right, hh, 0:HEAD_DIM_V], v_beta_shared)
+                    if chunk_idx == 0:
+                        T.async_copy(q[bb, left:right, hh, 0:HEAD_DIM_K], q_shared)
+                        T.async_copy(k[bb, left:right, hhg, 0:HEAD_DIM_K], k_shared)
+                        T.async_copy(A[bb, left:right, hh, 0:CHUNK_SIZE], a_shared)
+                        T.async_copy(v[bb, left:right, hh, 0:HEAD_DIM_V], v_beta_shared)
                     for i in T.Parallel(CHUNK_SIZE):
                         g_shared[i] = g_cumsum[bb, left + i, hh]
                         beta_shared[i] = beta[bb, left + i, hh]
@@ -204,6 +205,15 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                         * exp_g_last * inv_exp_g_shared[i],
                         dtype,
                     )
+
+                # Prefetch next chunk's data (overlaps with state_update GEMM + state update)
+                next_left = (chunk_idx + 1) * CHUNK_SIZE
+                next_right = next_left + CHUNK_SIZE
+                if next_right <= num_tokens:
+                    T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
+                    T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_shared)
+                    T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
+                    T.async_copy(v[bb, next_left:next_right, hh, 0:HEAD_DIM_V], v_beta_shared)
 
                 # state = exp(g_last) * state + K_decay_last^T @ V_new  (BF16^T x BF16 -> FP32)
                 T.gemm(

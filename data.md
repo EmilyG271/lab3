@@ -276,3 +276,28 @@ Optimization: Negate W, accumulate -W@state onto u_frag (clear_accum=False)
 
 Notes: Geometric mean ~5.9% faster than v24, ~51.0% faster than baseline.
 Fixed deep_gva_state regression from v24. Negate+accumulate is very efficient.
+
+
+## v31 (commit 211d924, fuse K_decay + V_beta loop) - FAILED (regression), REVERTED
+Date: 2026-08-16
+Status: ALL PASS (8/8), but slower than v30
+Optimization: Fused K_decay and V_beta element-wise loops into single T.Parallel (non-tail case).
+- Both loops are (64, 128), write to different shared memory arrays (kv_scratch, v_beta)
+- Reordered: fused loop before W GEMM (V_beta was previously between W and U GEMMs)
+
+| Case | v30 (ms) | v31 (ms) | vs v30 |
+|------|----------|----------|--------|
+| short_tail_state | 0.193 | 0.204 | +5.7% |
+| chain_equal | 1.177 | 1.207 | +2.5% |
+| parallel_equal | 0.597 | 0.628 | +5.2% |
+| parallel_gva | 0.668 | 0.705 | +5.5% |
+| long_low_gva | 5.266 | 5.298 | +0.6% |
+| batch_split_gva | 4.077 | 4.190 | +2.8% |
+| wide_gva_state | 7.556 | 7.608 | +0.7% |
+| deep_gva_state | 8.318 | 8.420 | +1.2% |
+
+Notes: Geometric mean ~2.8% slower than v30. Reverted to v30 (5215cac).
+Root cause: Fusing K_decay + V_beta delays W GEMM start by V_beta work amount.
+The W GEMM is the critical path - delaying it costs more than saving one loop launch.
+Also, accessing two shared memory arrays in one T.Parallel may cause bank conflicts.
+Lesson: Don't fuse loops that delay critical-path GEMMs. Keep V_beta between W and U GEMMs.
