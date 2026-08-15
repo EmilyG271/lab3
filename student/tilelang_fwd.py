@@ -134,37 +134,28 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                         dtype,
                     )
 
-                # V_beta = V * beta  -> BF16 (V already loaded via async_copy in non-tail)
+                # K_state = K_decay @ state (replaces W=A@K_decay, saves 1 GEMM)
+                T.gemm(kv_scratch_shared, state_bf16, u_frag, clear_accum=True)
+                T.copy(u_frag, kv_scratch_shared)
+
+                # Fused V*beta - K_state (non-tail: V in shared; saves 1 element-wise loop)
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                        v_beta_shared[i, d] = T.cast(
-                            T.cast(v_beta_shared[i, d], accum_dtype)
-                            * beta_shared[i],
+                        kv_scratch_shared[i, d] = T.cast(
+                            T.cast(v_beta_shared[i, d], accum_dtype) * beta_shared[i]
+                            - T.cast(kv_scratch_shared[i, d], accum_dtype),
                             dtype,
                         )
                 else:
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                         if left + i < num_tokens:
-                            v_beta_shared[i, d] = T.cast(
-                                T.cast(v[bb, left + i, hh, d], accum_dtype)
-                                * beta_shared[i],
+                            kv_scratch_shared[i, d] = T.cast(
+                                T.cast(v[bb, left + i, hh, d], accum_dtype) * beta_shared[i]
+                                - T.cast(kv_scratch_shared[i, d], accum_dtype),
                                 dtype,
                             )
                         else:
-                            v_beta_shared[i, d] = 0
-
-                # K_state = K_decay @ state (replaces W=A@K_decay, saves 1 GEMM)
-                # V_new = A@(V_beta - K_decay@state) = A@V_beta - A@(K_decay@state)
-                T.gemm(kv_scratch_shared, state_bf16, u_frag, clear_accum=True)
-                T.copy(u_frag, kv_scratch_shared)
-
-                # V_beta - K_state (store in kv_scratch_shared, overwriting K_state)
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    kv_scratch_shared[i, d] = T.cast(
-                        T.cast(v_beta_shared[i, d], accum_dtype)
-                        - T.cast(kv_scratch_shared[i, d], accum_dtype),
-                        dtype,
-                    )
+                            kv_scratch_shared[i, d] = 0
 
                 # V_new = A @ (V_beta - K_state)
                 T.gemm(a_shared, kv_scratch_shared, u_frag, clear_accum=True)
