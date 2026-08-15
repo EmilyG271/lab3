@@ -64,8 +64,8 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
             # FP32 scratch for GEMMs with state (both FP32)
             scratch_fp32 = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=accum_dtype)
-            v_new_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_V), dtype=accum_dtype)
-            scores_shared = T.alloc_shared((CHUNK_SIZE, CHUNK_SIZE), dtype=accum_dtype)
+            v_new_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_V), dtype=dtype)
+            scores_shared = T.alloc_shared((CHUNK_SIZE, CHUNK_SIZE), dtype=dtype)
 
             # Fragments (registers, FP32 accumulators)
             w_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_K), dtype=accum_dtype)
@@ -150,38 +150,44 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                         else:
                             kv_scratch_shared[i, d] = 0
 
-                # U = A @ V_beta  (BF16 x BF16 -> FP32 frag)
+                # U = A @ V_beta  (BF16 x BF16 -> FP32 frag, keep in u_frag)
                 T.gemm(a_shared, kv_scratch_shared, u_frag, clear_accum=True)
-                T.copy(u_frag, v_new_shared)
 
-                # V_new = U - W @ S  (FP32 x FP32 -> FP32 frag)
+                # V_new = U - W @ S  (FP32 computation, cast result to BF16 shared)
                 T.gemm(scratch_fp32, state_shared, temp_frag, clear_accum=True)
                 T.copy(temp_frag, scratch_fp32)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
-                    v_new_shared[i, d] = v_new_shared[i, d] - scratch_fp32[i, d]
+                    v_new_shared[i, d] = T.cast(
+                        u_frag[i, d] - scratch_fp32[i, d], dtype
+                    )
                 # output_from_state = scale * exp(g) * (Q @ S)
                 # Q @ state (result kept in temp_frag, no global write yet)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     scratch_fp32[i, d] = T.cast(q_shared[i, d], accum_dtype)
                 T.gemm(scratch_fp32, state_shared, temp_frag, clear_accum=True)
 
-                # scores = Q @ K^T  (BF16 x BF16 -> FP32 frag)
+                # scores = Q @ K^T  (BF16 x BF16 -> FP32 frag, apply mask + cast to BF16 shared)
                 T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
                 for i, j in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
                     if i >= j:
-                        scores_frag[i, j] = scores_frag[i, j] * exp_g_shared[i] * inv_exp_g_shared[j]
+                        scores_shared[i, j] = T.cast(
+                            scores_frag[i, j] * exp_g_shared[i] * inv_exp_g_shared[j],
+                            dtype,
+                        )
                     else:
-                        scores_frag[i, j] = 0
-                T.copy(scores_frag, scores_shared)
+                        scores_shared[i, j] = 0
 
-                # output_in_chunk = scores @ V_new  (FP32 x FP32 -> FP32 frag)
+                # output_in_chunk = scores @ V_new  (BF16 x BF16 -> FP32 frag)
                 T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
+
+                # Copy Q@state to shared (temp_frag layout differs from out_chunk_frag's BF16 GEMM)
+                T.copy(temp_frag, scratch_fp32)
 
                 # Fused output: scale * (exp(g) * Q@state + scores@V_new)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                     if left + i < num_tokens:
                         output[bb, left + i, hh, d] = T.cast(
-                            SCALE * (exp_g_shared[i] * temp_frag[i, d] + out_chunk_frag[i, d]),
+                            SCALE * (exp_g_shared[i] * scratch_fp32[i, d] + out_chunk_frag[i, d]),
                             dtype,
                         )
 
@@ -189,23 +195,21 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 g_last = g_shared[CHUNK_SIZE - 1]
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
 
-                for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
-                    state_shared[d1, d2] = state_shared[d1, d2] * exp_g_last
-
-                # K_decay_last = K * exp(g_last - g)  -> FP32 (reuse scratch_fp32)
+                # K_decay_last = K * exp(g_last - g)  -> BF16 (reuse kv_scratch_shared)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
-                    scratch_fp32[i, d] = (
+                    kv_scratch_shared[i, d] = T.cast(
                         T.cast(k_shared[i, d], accum_dtype)
-                        * exp_g_last * inv_exp_g_shared[i]
+                        * exp_g_last * inv_exp_g_shared[i],
+                        dtype,
                     )
 
-                # state += K_decay_last^T @ V_new  (FP32^T x FP32 -> FP32)
+                # state = exp(g_last) * state + K_decay_last^T @ V_new  (BF16^T x BF16 -> FP32)
                 T.gemm(
-                    scratch_fp32, v_new_shared, state_update_frag,
+                    kv_scratch_shared, v_new_shared, state_update_frag,
                     transpose_A=True, clear_accum=True,
                 )
                 for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
-                    state_shared[d1, d2] = state_shared[d1, d2] + state_update_frag[d1, d2]
+                    state_shared[d1, d2] = state_shared[d1, d2] * exp_g_last + state_update_frag[d1, d2]
 
             # Write final state
             T.copy(state_shared, final_state[bb, hh, :, :])

@@ -85,3 +85,25 @@ Status: ALL PASS (8/8)
 
 Notes: Larger cases benefit more (more chunks = more exp2 savings). chain_equal slightly worse.
 Overall ~1% improvement vs v10, ~21% vs baseline.
+
+## v16 (commit 79af99e, fuse output writes) - SUCCESS
+Date: 2026-08-15
+Status: ALL PASS (8/8)
+Optimization: Fused two separate output writes (output_from_state + output_in_chunk) into a single pass
+- Eliminated T.copy(temp_frag, scratch_fp32) after Q@state GEMM
+- Eliminated T.copy(out_chunk_frag, scratch_fp32) after scores@V_new GEMM
+- Eliminated one global memory write (output_from_state was written then read back for +=)
+- Combined: output = scale * (exp(g) * Q@state + scores@V_new) in one T.Parallel loop
+
+| Case | v13 (ms) | v16 (ms) | vs v13 | vs baseline |
+|------|----------|----------|--------|-------------|
+| short_tail_state | 0.359 | 0.353 | -1.7% | -22.9% |
+| chain_equal | 2.449 | 2.361 | -3.6% | -23.4% |
+| parallel_equal | 1.282 | 1.278 | -0.3% | -21.8% |
+| parallel_gva | 1.356 | 1.319 | -2.7% | -21.9% |
+| long_low_gva | 10.015 | 9.978 | -0.4% | -23.7% |
+| batch_split_gva | 7.726 | 7.670 | -0.7% | -24.9% |
+| wide_gva_state | 13.688 | 13.513 | -1.3% | -23.4% |
+| deep_gva_state | 15.969 | 15.793 | -1.1% | -23.2% |
+
+Notes: chain_equal and parallel_gva benefited most (>2%). Geometric mean ~1.4% vs v13, ~23% vs baseline.
