@@ -100,13 +100,13 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                             a_shared[i, j] = A[bb, left + i, hh, j]
                         else:
                             a_shared[i, j] = 0
-                    for i in T.Parallel(CHUNK_SIZE):
-                        if left + i < num_tokens:
-                            g_shared[i] = g_cumsum[bb, left + i, hh]
-                            beta_shared[i] = beta[bb, left + i, hh]
-                        else:
-                            g_shared[i] = 0
-                            beta_shared[i] = 0
+                   for i in T.Parallel(CHUNK_SIZE):
+                       if left + i < num_tokens:
+                           g_shared[i] = g_cumsum[bb, left + i, hh]
+                           beta_shared[i] = beta[bb, left + i, hh]
+                       else:
+                            g_shared[i] = g_cumsum[bb, num_tokens - 1, hh]
+                           beta_shared[i] = 0
 
                 # K_decay = K * beta * exp(g)  -> BF16 (for GEMM with A which is BF16)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
@@ -174,11 +174,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                         )
 
                 # State update: state = exp(g_last) * state + K_decay_last^T @ V_new
-                # Tail chunk: use last valid token's cumsum, not padded position
-                if right <= num_tokens:
-                    g_last = g_shared[CHUNK_SIZE - 1]
-                else:
-                    g_last = g_shared[num_tokens - left - 1]
+                g_last = g_shared[CHUNK_SIZE - 1]
                 exp_g_last = T.exp2(g_last * LOG2E)
 
                 for d1, d2 in T.Parallel(HEAD_DIM_K, HEAD_DIM_V):
