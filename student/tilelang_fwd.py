@@ -136,10 +136,9 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
                 # V_beta = V * beta  -> BF16 (reuse kv_scratch_shared, K_decay no longer needed)
                 if right <= num_tokens:
-                    T.copy(v[bb, left:right, hh, 0:HEAD_DIM_V], kv_scratch_shared)
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                         kv_scratch_shared[i, d] = T.cast(
-                            T.cast(kv_scratch_shared[i, d], accum_dtype)
+                            T.cast(v[bb, left + i, hh, d], accum_dtype)
                             * beta_shared[i],
                             dtype,
                         )
@@ -161,8 +160,13 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     kv_scratch_shared[i, d] = T.cast(scratch_fp32[i, d], dtype)
 
-                # V_new = U - W @ S  (BF16 x BF16 -> FP32 frag, then subtract)
+                # V_new GEMM: W @ state  (BF16 x BF16 -> FP32 frag)
                 T.gemm(kv_scratch_shared, state_bf16, temp_frag, clear_accum=True)
+
+                # scores = Q @ K^T  (moved earlier for ILP overlap)
+                T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
+
+                # V_new = U - W @ state
                 T.copy(temp_frag, scratch_fp32)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                     v_new_shared[i, d] = T.cast(
@@ -171,9 +175,6 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 # output_from_state = scale * exp(g) * (Q @ S)
                 # Q @ state (BF16 x BF16 -> FP32 frag, no Q cast needed)
                 T.gemm(q_shared, state_bf16, temp_frag, clear_accum=True)
-
-                # scores = Q @ K^T  (BF16 x BF16 -> FP32 frag, apply mask + cast to BF16 shared)
-                T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
                 for i, j in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
                     if i >= j:
                         scores_shared[i, j] = T.cast(

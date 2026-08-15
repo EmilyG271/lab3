@@ -185,3 +185,22 @@ Optimization: Moved state_bf16 refresh from start-of-chunk to end-of-chunk, fuse
 | deep_gva_state | 11.787 | 11.692 | -0.8% | -43.1% |
 
 Notes: Long-sequence cases benefit most (more chunks = more saved passes).
+## v20 (commit 8a3a4b2, precompute beta * exp_g) - SUCCESS
+Date: 2026-08-15
+Status: ALL PASS (8/8)
+Optimization: Precompute beta * exp_g into beta_exp_g_shared, use in K_decay
+- Saves one multiply per element in K_decay computation
+- Adds 256 bytes shared memory (negligible)
+
+| Case | v19 (ms) | v20 (ms) | vs v19 | vs baseline |
+|------|----------|----------|--------|-------------|
+| short_tail_state | 0.259 | 0.256 | -1.2% | -43.9% |
+| chain_equal | 1.632 | 1.588 | -2.7% | -48.5% |
+| parallel_equal | 0.928 | 0.904 | -2.6% | -44.7% |
+| parallel_gva | 0.965 | 0.976 | +1.1% | -42.2% |
+| long_low_gva | 7.156 | 7.122 | -0.5% | -45.6% |
+| batch_split_gva | 5.640 | 5.620 | -0.4% | -45.0% |
+| wide_gva_state | 10.139 | 10.104 | -0.3% | -42.7% |
+| deep_gva_state | 11.692 | 11.619 | -0.6% | -43.5% |
+
+Notes: Geometric mean ~0.9% improvement. Some cases >2% faster, one case slightly slower (noise).
