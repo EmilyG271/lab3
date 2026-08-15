@@ -327,3 +327,24 @@ Notes: Total runtime -2.7% vs v30. Long sequences benefit greatly (chain_equal -
 long_low_gva -8.2%). Short high-head-count cases regress (parallel_equal +6.4%) due to
 memory bandwidth contention from prefetch across many concurrent blocks.
 Kept: net total improvement >2%, long cases dominate total runtime.
+
+
+## v40 (commit b6c6271, skip T.copy, read K_state from fragment) - FAILED (2.2% slower)
+Date: 2026-08-16
+Status: ALL PASS (8/8) but slower
+Optimization: Eliminate T.copy after K_state GEMM, read K_state from u_frag in subtraction.
+
+| Case | v38 (ms) | v40 (ms) | vs v38 |
+|------|----------|----------|--------|
+| short_tail_state | 0.177 | 0.187 | +5.4% |
+| chain_equal | 1.039 | 1.117 | +7.6% |
+| parallel_equal | 0.605 | 0.636 | +5.2% |
+| parallel_gva | 0.653 | 0.693 | +6.2% |
+| long_low_gva | 4.557 | 4.839 | +6.2% |
+| batch_split_gva | 3.871 | 4.054 | +4.7% |
+| wide_gva_state | 6.924 | 7.236 | +4.5% |
+| deep_gva_state | 7.882 | 8.314 | +5.5% |
+
+Notes: Total +2.2% vs v38. Confirms v36 lesson: reading from fragments in element-wise
+loops increases register pressure. Shared memory T.copy is cheap; register pressure is costly.
+Reverted to v38.
