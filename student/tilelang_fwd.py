@@ -105,6 +105,8 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                     for i in T.Parallel(CHUNK_SIZE):
                         g_shared[i] = g_cumsum[bb, left + i, hh]
                         beta_shared[i] = beta[bb, left + i, hh]
+                        exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
+                        inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
                 else:
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                         if left + i < num_tokens:
@@ -126,11 +128,10 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                             # Pad g with last valid cumsum so g_last is correct
                             g_shared[i] = g_cumsum[bb, num_tokens - 1, hh]
                             beta_shared[i] = 0
+                        exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
+                        inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
 
-                # Precompute exp(g) once per chunk
-                for i in T.Parallel(CHUNK_SIZE):
-                    exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
-                    inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
+                # exp(g) precomputed in g/beta load loop above
 
                 # Wait for async global memory loads (non-tail case only)
                 if right <= num_tokens:

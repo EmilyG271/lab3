@@ -542,3 +542,19 @@ Average: +0.0% vs v61, +0.2% vs v68. Mixed results, no consistent improvement.
 Reverted to keep v68 as baseline.
 
 CURRENT BEST: v68 (commit 2366595) - v61 + tail/non-tail output write split
+
+## v72 (commit 42a2841) - 2026-08-15
+优化方向：融合 output write 和 K_decay_last 为单个 T.Parallel 循环（非 tail 情况）
+测试结果：初始版 chain_equal FAIL (越界 fragment 访问)；修复版 PASS 8/8 但全面变慢 1-5% | 回退
+| Case | v70 (ms) | v72 (ms) | 变化 |
+|------|----------|----------|------|
+| short_tail_state | 0.1545 | 0.1588 | +2.8% |
+| chain_equal | 0.7017 | 0.6945 | -1.0% |
+| parallel_equal | 0.5164 | 0.5126 | -0.7% |
+| parallel_gva | 0.5896 | 0.5995 | +1.7% |
+| long_low_gva | 4.066 | 4.257 | +4.7% |
+| batch_split_gva | 3.318 | 3.416 | +3.0% |
+| wide_gva_state | 6.571 | 6.849 | +4.2% |
+| deep_gva_state | 7.158 | 7.464 | +4.3% |
+结论：回退到 v70。原因：fragment 在 K_decay 期间保持活跃增加寄存器压力，长序列受影响最大
+教训43：不要在访问 fragment 的循环中同时写入共享内存，会增加寄存器压力
