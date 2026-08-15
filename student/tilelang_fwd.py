@@ -143,12 +143,13 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 # Wait for async global memory loads (non-tail case only)
                 if right <= num_tokens:
                     T.ptx_wait_group(0)
-                    # Double-buffered V: copy prefetched V from v_next_shared to working buffer
-                    if chunk_idx > 0:
-                        T.copy(v_next_shared, v_beta_shared)
-                    # Issue V prefetch early (into v_next_shared, has whole chunk to complete)
-                    if has_next:
-                        T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_next_shared)
+                    if split_v == 1:
+                        # Double-buffered V: copy prefetched V from v_next_shared to working buffer
+                        if chunk_idx > 0:
+                            T.copy(v_next_shared, v_beta_shared)
+                        # Issue V prefetch early (into v_next_shared, has whole chunk to complete)
+                        if has_next:
+                            T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_next_shared)
 
                 # K_state = K @ state (use k_shared directly, skip K_decay shared mem write)
                 T.gemm(k_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
@@ -237,6 +238,10 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                     k_decay_shared, v_new_shared, state_frag,
                     transpose_A=True, clear_accum=False,
                 )
+                # For split_v=2: V prefetch at end of chunk (old approach, no T.copy overhead)
+                if split_v == 2:
+                    if has_next:
+                        T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
                 # Refresh state_bf16 from state_frag
                 T.copy(state_frag, state_bf16)
 
