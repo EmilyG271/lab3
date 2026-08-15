@@ -750,3 +750,28 @@ Decision: REVERTED (short_tail +3.5%, long_low_gva +6.3%)
 Root cause: With split_v=2, state GEMM output is 64x64 instead of 64x128. Smaller GEMM tiles underutilize Tensor Cores. The doubled grid size (8->16 blocks) doesn't compensate for reduced per-GEMM efficiency. Only 12% of SMs active (16/132) - still too low for GPU utilization to overcome GEMM efficiency loss.
 Lesson: split_v=2 is only beneficial when B*Hv<=4 (v53 finding holds). For B*Hv=8, split_v=1 with larger GEMMs is better despite lower grid utilization.
 Note: parallel_equal/parallel_gva slightly slower despite unchanged split_v - likely GPU variability or JIT choosing different optimizations due to the split_v=2 code path being compiled.
+
+## v92 (commit 871177f) - 2026-08-16
+Optimization: Double-buffered V prefetch
+Change: Added v_next_shared buffer. V prefetch moved from end of chunk (after state_update GEMM) to start of chunk (after ptx_wait_group). T.copy(v_next_shared, v_beta_shared) copies prefetched V to working buffer. This gives V prefetch the entire chunk processing time to complete, instead of just state_refresh time.
+Status: PASS 8/8
+
+| Case | v83 (ms) | v92 (ms) | Change | split_v |
+|------|----------|----------|--------|---------|
+| short_tail_state | 0.154272 | 0.155168 | +0.6% | 1 |
+| chain_equal | 0.654608 | 0.666736 | +1.9% | 2 |
+| parallel_equal | 0.474976 | 0.470432 | -1.0% | 1 |
+| parallel_gva | 0.540816 | 0.537712 | -0.6% | 1 |
+| long_low_gva | 3.910256 | 3.905600 | -0.1% | 1 |
+| batch_split_gva | 3.119488 | 3.107776 | -0.4% | 1 |
+| wide_gva_state | 5.740336 | 5.437792 | -5.3% | 1 |
+| deep_gva_state | 6.425248 | 6.196000 | -3.6% | 1 |
+
+Decision: KEPT (wide_gva_state -5.3%, deep_gva_state -3.6% are big wins. chain_equal +1.9% due to T.copy overhead on short 5us chunks)
+Lesson: V prefetch was the ptx_wait_group bottleneck for large-state cases (wide/deep_gva_state). Double-buffering gives V the whole chunk to complete. The T.copy barrier overhead (~1us) is negligible for long chunks but hurts short chunks (chain_equal +1.9%).
+Next: v93 will conditionally apply double-buffering only for split_v=1 to fix chain_equal regression.
+
+## v93 (commit ad534b9) - 2026-08-16
+Optimization: Conditional double-buffered V (split_v=1 only)
+Change: Use double-buffered V prefetch only when split_v=1. For split_v=2 (chain_equal), keep old approach (V prefetch at end of chunk). This avoids T.copy overhead for the short-chunk case.
+Status: Testing...
