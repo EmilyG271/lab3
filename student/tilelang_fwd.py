@@ -194,13 +194,20 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 g_last = g_shared[CHUNK_SIZE - 1]
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
 
-                # Output write (head_dim_v_split columns)
-                for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
-                    if left + i < num_tokens:
+                # Output write (non-tail: no bounds check, tail: with bounds check)
+                if right <= num_tokens:
+                    for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
                         output[bb, left + i, hh, v_offset + d] = T.cast(
                             SCALE * (exp_g_shared[i] * u_frag[i, d] + out_chunk_frag[i, d]),
                             dtype,
                         )
+                else:
+                    for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
+                        if left + i < num_tokens:
+                            output[bb, left + i, hh, v_offset + d] = T.cast(
+                                SCALE * (exp_g_shared[i] * u_frag[i, d] + out_chunk_frag[i, d]),
+                                dtype,
+                            )
                 # K_decay_last = K * exp_g_last * inv_exp_g (HEAD_DIM_K columns)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     k_decay_shared[i, d] = T.cast(

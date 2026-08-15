@@ -515,3 +515,21 @@ Same JIT compilation artifact as v57. Extending split_v threshold causes recompi
 of all kernels including unchanged ones, producing suboptimal code.
 
 CURRENT BEST: v61 (commit b1ac803/84ad8a1)
+
+## v67 (commit 67d6f78, TL_FORCE_LET_INLINE=True) - REVERTED (slight regression)
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Optimization: Added TL_FORCE_LET_INLINE pass config to inline let bindings, reduce register pressure.
+Average: +1.1% vs v61. chain_equal +3.7%, other cases within noise.
+TL_FORCE_LET_INLINE increases instruction count without reducing registers enough to improve occupancy.
+
+## Inspect results (job 101658)
+Discovered full PassConfigKey list. Key new options:
+- TL_FORCE_LET_INLINE (tried v67, slight regression)
+- TL_PTXAS_REGISTER_USAGE_LEVEL (controls ptxas register allocation)
+- T.Unroll (loop unrolling annotation)
+- T.wgmma_gemm, T.tcgen05_gemm (direct tensor core APIs)
+- T.tma_copy, T.tma_load (TMA operations for Hopper)
+- T.warp_reduce_sum, T.tvm_warp_shuffle (warp-level operations)
+- TIR_DISABLE_CSE, TL_SIMPLIFY_ENABLE_LET_INLINE, TL_STORAGE_REWRITE_DETECT_INPLACE
+- TL_DISABLE_LOOP_UNSWITCHING, TL_LOOP_UNSWITCHING_ALLOW_NON_TRIVIAL_ELSE
