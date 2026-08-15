@@ -70,7 +70,6 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             scores_shared = T.alloc_shared((CHUNK_SIZE, CHUNK_SIZE), dtype=dtype)
 
             # Fragments (registers, FP32 accumulators)
-            w_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_K), dtype=accum_dtype)
             u_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V), dtype=accum_dtype)
             out_chunk_frag = T.alloc_fragment((CHUNK_SIZE, HEAD_DIM_V), dtype=accum_dtype)
             scores_frag = T.alloc_fragment((CHUNK_SIZE, CHUNK_SIZE), dtype=accum_dtype)
@@ -135,11 +134,6 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                         dtype,
                     )
 
-                # W = A @ K_decay  (BF16 x BF16 -> FP32 frag)
-                T.gemm(a_shared, kv_scratch_shared, w_frag, clear_accum=True)
-                # Cast W to BF16 in kv_scratch_shared (K_decay no longer needed)
-                T.copy(w_frag, kv_scratch_shared)
-
                 # V_beta = V * beta  -> BF16 (V already loaded via async_copy in non-tail)
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
@@ -159,17 +153,21 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                         else:
                             v_beta_shared[i, d] = 0
 
-                # U = A @ V_beta  (BF16 x BF16 -> FP32 frag, keep in u_frag)
-                T.gemm(a_shared, v_beta_shared, u_frag, clear_accum=True)
+                # K_state = K_decay @ state (replaces W=A@K_decay, saves 1 GEMM)
+                # V_new = A@(V_beta - K_decay@state) = A@V_beta - A@(K_decay@state)
+                T.gemm(kv_scratch_shared, state_bf16, u_frag, clear_accum=True)
+                T.copy(u_frag, kv_scratch_shared)
 
-                # Negate W for subtraction via GEMM accumulation
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
+                # V_beta - K_state (store in kv_scratch_shared, overwriting K_state)
+                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                     kv_scratch_shared[i, d] = T.cast(
-                        -T.cast(kv_scratch_shared[i, d], accum_dtype), dtype
+                        T.cast(v_beta_shared[i, d], accum_dtype)
+                        - T.cast(kv_scratch_shared[i, d], accum_dtype),
+                        dtype,
                     )
 
-                # V_new = U - W@state: accumulate -W@state onto u_frag
-                T.gemm(kv_scratch_shared, state_bf16, u_frag, clear_accum=False)
+                # V_new = A @ (V_beta - K_state)
+                T.gemm(a_shared, kv_scratch_shared, u_frag, clear_accum=True)
                 T.copy(u_frag, v_new_shared)
 
                 # scores = Q @ K^T  (moved earlier for ILP overlap)

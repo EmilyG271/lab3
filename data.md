@@ -301,3 +301,29 @@ Root cause: Fusing K_decay + V_beta delays W GEMM start by V_beta work amount.
 The W GEMM is the critical path - delaying it costs more than saving one loop launch.
 Also, accessing two shared memory arrays in one T.Parallel may cause bank conflicts.
 Lesson: Don't fuse loops that delay critical-path GEMMs. Keep V_beta between W and U GEMMs.
+
+
+## v32 (commit 21b33ea, cross-chunk prefetch) - SUCCESS (mixed)
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Optimization: Prefetch next chunk's Q/K/A/V via T.async_copy at end of current chunk.
+- Prefetch overlaps with state_update_frag GEMM + state update loop
+- Only first chunk (chunk_idx==0) issues async copies at start; subsequent chunks
+  get data from prefetch, just wait at T.ptx_wait_group(0)
+- Condition: next_right <= num_tokens (only prefetch if next chunk is non-tail)
+
+| Case | v30 (ms) | v32 (ms) | vs v30 | vs baseline |
+|------|----------|----------|--------|-------------|
+| short_tail_state | 0.193 | 0.186 | -3.6% | -59.4% |
+| chain_equal | 1.177 | 1.084 | -7.9% | -64.8% |
+| parallel_equal | 0.597 | 0.635 | +6.4% | -61.2% |
+| parallel_gva | 0.668 | 0.690 | +3.3% | -59.2% |
+| long_low_gva | 5.266 | 4.835 | -8.2% | -63.0% |
+| batch_split_gva | 4.077 | 4.068 | -0.2% | -60.1% |
+| wide_gva_state | 7.556 | 7.339 | -2.9% | -58.4% |
+| deep_gva_state | 8.318 | 8.272 | -0.6% | -59.8% |
+
+Notes: Total runtime -2.7% vs v30. Long sequences benefit greatly (chain_equal -7.9%,
+long_low_gva -8.2%). Short high-head-count cases regress (parallel_equal +6.4%) due to
+memory bandwidth contention from prefetch across many concurrent blocks.
+Kept: net total improvement >2%, long cases dominate total runtime.
