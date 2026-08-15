@@ -488,3 +488,30 @@ Q/K/A prefetch stays before state scale (overlaps with state_update GEMM).
 Average: -1.65% vs v53. Major win: batch_split_gva -7.0%. Shared memory reduced from ~129KB to ~113KB.
 
 CURRENT BEST: v61 (commit b1ac803)
+
+
+## v62 (commit 10095f4, alias scores_shared with a_shared) - REVERTED (slight regression)
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Optimization: Alias scores_shared with a_shared (saves 8KB shared mem, 113KB -> 105KB).
+Average: +0.5% vs v61. Alias introduces access pattern conflicts, negating savings.
+
+## v63 (commit 359d821, FullCol for out_chunk GEMM) - REVERTED (regression)
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Average: +0.6% vs v61. FullCol hurts small cases (short_tail +2.1%, chain_equal +2.0%).
+
+## v64 (commit fbb208c, FullRow for state_update GEMM) - REVERTED (CUDA crash)
+Date: 2026-08-16
+Status: CRASH (CUDA illegal memory access)
+FullRow with transpose_A=True causes out-of-bounds access. Incompatible combination.
+
+## v65 (commit 34877ed, extend split_v to B*H<=8) - REVERTED (anomalous regression)
+Date: 2026-08-16
+Status: ALL PASS (8/8)
+Anomalous regression in UNCHANGED H=2 kernels: short_tail_state +42%, long_low_gva +46%.
+batch_split_gva (target case): +0.1% vs v61, no improvement.
+Same JIT compilation artifact as v57. Extending split_v threshold causes recompilation
+of all kernels including unchanged ones, producing suboptimal code.
+
+CURRENT BEST: v61 (commit b1ac803/84ad8a1)
