@@ -37,3 +37,34 @@ wide_gva_state: 14.217ms (-19.4%), deep_gva_state: 16.427ms (-20.1%)
 short_tail_state: 0.362, chain_equal: 2.387, parallel_equal: 1.320, parallel_gva: 1.374
 long_low_gva: 10.329, batch_split_gva: 7.988, wide_gva_state: 14.185, deep_gva_state: 16.421
 No significant change, keeping for code cleanliness.
+
+## v10 (commit 2842b8f, merge kv_scratch_shared)
+Date: 2026-08-15
+Status: ALL PASS (8/8)
+Optimization: Merged k_decay_shared and v_beta_shared into single kv_scratch_shared buffer (saves 16KB shared mem)
+
+| Case | Latency (ms) | vs v9 |
+|------|-------------|-------|
+| short_tail_state | 0.365 | +0.8% |
+| chain_equal | 2.416 | +1.2% |
+| parallel_equal | 1.316 | -0.3% |
+| parallel_gva | 1.362 | -0.9% |
+| long_low_gva | 10.302 | -0.3% |
+| batch_split_gva | 8.057 | +0.9% |
+| wide_gva_state | 14.115 | -0.5% |
+| deep_gva_state | 16.616 | +1.2% |
+
+Notes: Within noise. Merged buffer saves 16KB shared mem but doesn't change occupancy (still 1 block/SM).
+
+## v11 (commit 1006002, precompute exp_g + inv_exp_g) - FAILED
+Date: 2026-08-15
+Status: ALL FAIL (0/8) - Compilation error
+Error: "A and B must have the same dtype" during JIT compilation
+Cause: Likely dtype inference issue with 1.0/eg division or shared memory access in fragment operations
+Action: Reset to v10, trying conservative version (v11b)
+
+## v11b (commit 130e58b, precompute exp_g only)
+Date: 2026-08-15
+Status: TESTING
+Optimization: Precompute exp_g once, use in K_decay, output_from_state, state decay.
+Keep decay_mask and K_decay_last using T.exp2 (they involve g differences).

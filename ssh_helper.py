@@ -29,7 +29,7 @@ def run_remote(cmd, timeout=60):
 
 
 def git_pull():
-    out, err = run_remote("cd ~/hpc101-lab3 && git pull 2>&1")
+    out, err = run_remote("cd ~/hpc101-lab3 && git fetch origin && git reset --hard origin/main 2>&1")
     return out.strip()
 
 
