@@ -100,13 +100,14 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                             a_shared[i, j] = A[bb, left + i, hh, j]
                         else:
                             a_shared[i, j] = 0
-                   for i in T.Parallel(CHUNK_SIZE):
-                       if left + i < num_tokens:
-                           g_shared[i] = g_cumsum[bb, left + i, hh]
-                           beta_shared[i] = beta[bb, left + i, hh]
-                       else:
+                    for i in T.Parallel(CHUNK_SIZE):
+                        if left + i < num_tokens:
+                            g_shared[i] = g_cumsum[bb, left + i, hh]
+                            beta_shared[i] = beta[bb, left + i, hh]
+                        else:
+                            # Pad g with last valid cumsum so g_last is correct
                             g_shared[i] = g_cumsum[bb, num_tokens - 1, hh]
-                           beta_shared[i] = 0
+                            beta_shared[i] = 0
 
                 # K_decay = K * beta * exp(g)  -> BF16 (for GEMM with A which is BF16)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
