@@ -233,3 +233,46 @@ Optimization: Decouple V_beta from kv_scratch_shared using dedicated v_beta_shar
 
 Notes: Geometric mean ~4.7% faster than v21b, ~46.6% faster than baseline.
 Key discovery: T.copy supports cross-dtype (FP32->BF16) conversion!
+
+## v24 (commit d1288cb, fuse output + K_decay_last) - SUCCESS (mixed)
+Date: 2026-08-15
+Status: ALL PASS (8/8), mixed results
+Optimization: Fuse output write loop with K_decay_last computation (same dims, independent)
+
+| Case | v23b (ms) | v24 (ms) | vs v23b | vs baseline |
+|------|----------|----------|--------|-------------|
+| short_tail_state | 0.248 | 0.233 | -6.0% | -49.1% |
+| chain_equal | 1.478 | 1.493 | +1.0% | -51.6% |
+| parallel_equal | 0.841 | 0.832 | -1.1% | -49.1% |
+| parallel_gva | 0.923 | 0.886 | -4.0% | -47.6% |
+| long_low_gva | 6.915 | 6.752 | -2.4% | -48.4% |
+| batch_split_gva | 5.446 | 5.290 | -2.9% | -48.2% |
+| wide_gva_state | 9.575 | 9.635 | +0.6% | -45.3% |
+| deep_gva_state | 10.990 | 11.329 | +3.1% | -44.8% |
+
+Notes: deep_gva_state regressed 3.1%, but fixed by v25.
+
+## v25 (commit f5ed5ec, negate W + accumulate, eliminate temp_frag) - SUCCESS, MAJOR WIN
+Date: 2026-08-15
+Status: ALL PASS (8/8)
+Optimization: Negate W, accumulate -W@state onto u_frag (clear_accum=False)
+- Eliminates temp_frag entirely (saves registers)
+- Eliminates T.copy(temp_frag, scratch_fp32) for W@state (32KB write)
+- Eliminates V_new subtraction loop (32KB read + 16KB write)
+- Adds: negate W loop (32KB), T.copy(u_frag, v_new_shared) cross-dtype (16KB)
+- Reuses u_frag for Q@state after V_new is computed
+- Net: ~32KB less traffic per chunk, fewer registers
+
+| Case | v24 (ms) | v25 (ms) | vs v24 | vs baseline |
+|------|----------|----------|--------|-------------|
+| short_tail_state | 0.233 | 0.223 | -4.3% | -51.3% |
+| chain_equal | 1.493 | 1.415 | -5.2% | -54.1% |
+| parallel_equal | 0.832 | 0.798 | -4.1% | -51.2% |
+| parallel_gva | 0.886 | 0.859 | -3.1% | -49.2% |
+| long_low_gva | 6.752 | 6.201 | -8.2% | -52.6% |
+| batch_split_gva | 5.290 | 4.928 | -6.8% | -51.8% |
+| wide_gva_state | 9.635 | 8.995 | -6.6% | -49.0% |
+| deep_gva_state | 11.329 | 10.244 | -9.6% | -50.2% |
+
+Notes: Geometric mean ~5.9% faster than v24, ~51.0% faster than baseline.
+Fixed deep_gva_state regression from v24. Negate+accumulate is very efficient.

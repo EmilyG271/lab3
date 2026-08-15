@@ -66,8 +66,6 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
             # Dedicated V_beta buffer (decouples from kv_scratch_shared)
             v_beta_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_V), dtype=dtype)
 
-            # FP32 scratch for GEMMs with state (both FP32)
-            scratch_fp32 = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=accum_dtype)
             v_new_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_V), dtype=dtype)
             scores_shared = T.alloc_shared((CHUNK_SIZE, CHUNK_SIZE), dtype=dtype)
 
@@ -186,9 +184,6 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 # output_in_chunk = scores @ V_new  (BF16 x BF16 -> FP32 frag)
                 T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
 
-                # Copy Q@state to shared
-                T.copy(u_frag, scratch_fp32)
-
                 # State update prep
                 g_last = g_shared[CHUNK_SIZE - 1]
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
@@ -197,7 +192,7 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                     if left + i < num_tokens:
                         output[bb, left + i, hh, d] = T.cast(
-                            SCALE * (exp_g_shared[i] * scratch_fp32[i, d] + out_chunk_frag[i, d]),
+                            SCALE * (exp_g_shared[i] * u_frag[i, d] + out_chunk_frag[i, d]),
                             dtype,
                         )
                     kv_scratch_shared[i, d] = T.cast(
