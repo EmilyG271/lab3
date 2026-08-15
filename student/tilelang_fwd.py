@@ -87,9 +87,10 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
 
                 # Load chunk data with tail handling
                 if right <= num_tokens:
-                    T.copy(q[bb, left:right, hh, 0:HEAD_DIM_K], q_shared)
-                    T.copy(k[bb, left:right, hhg, 0:HEAD_DIM_K], k_shared)
-                    T.copy(A[bb, left:right, hh, 0:CHUNK_SIZE], a_shared)
+                    T.async_copy(q[bb, left:right, hh, 0:HEAD_DIM_K], q_shared)
+                    T.async_copy(k[bb, left:right, hhg, 0:HEAD_DIM_K], k_shared)
+                    T.async_copy(A[bb, left:right, hh, 0:CHUNK_SIZE], a_shared)
+                    T.async_copy(v[bb, left:right, hh, 0:HEAD_DIM_V], v_beta_shared)
                     for i in T.Parallel(CHUNK_SIZE):
                         g_shared[i] = g_cumsum[bb, left + i, hh]
                         beta_shared[i] = beta[bb, left + i, hh]
@@ -121,6 +122,10 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                     inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
                     beta_exp_g_shared[i] = beta_shared[i] * exp_g_shared[i]
 
+                # Wait for async global memory loads (non-tail case only)
+                if right <= num_tokens:
+                    T.ptx_wait_group(0)
+
                 # K_decay = K * beta * exp(g)  -> BF16 (for GEMM with A which is BF16)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     kv_scratch_shared[i, d] = T.cast(
@@ -134,9 +139,8 @@ def _gdn_prefill_kernel(H, Hg, dtype, accum_dtype):
                 # Cast W to BF16 in kv_scratch_shared (K_decay no longer needed)
                 T.copy(w_frag, kv_scratch_shared)
 
-                # V_beta = V * beta  -> BF16 (dedicated buffer, kv_scratch has W)
+                # V_beta = V * beta  -> BF16 (V already loaded via async_copy in non-tail)
                 if right <= num_tokens:
-                    T.copy(v[bb, left:right, hh, 0:HEAD_DIM_V], v_beta_shared)
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_V):
                         v_beta_shared[i, d] = T.cast(
                             T.cast(v_beta_shared[i, d], accum_dtype)
