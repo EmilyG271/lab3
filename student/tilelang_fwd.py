@@ -199,6 +199,9 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         scores_shared[i, j] = 0
 
                 # output_in_chunk = scores @ V_new  (BF16 x BF16 -> FP32 frag)
+                T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
+
+                # State update prep
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
 
                 # K_decay_last = K * exp_g_last * inv_exp_g (HEAD_DIM_K columns)
@@ -217,8 +220,6 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                     k_decay_shared, v_new_shared, state_frag,
                     transpose_A=True, clear_accum=False,
                 )
-                # output_in_chunk = scores @ V_new (moved after state GEMM for V_new cache reuse)
-                T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
                 # Output write (moved after state update for ILP overlap with GEMM)
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
