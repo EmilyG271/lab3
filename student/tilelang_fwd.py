@@ -73,8 +73,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, head_dim_v_split), dtype=dtype)
             else:
                 kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
-                # k_decay modifies k_shared in-place (overwritten by next chunk's K prefetch)
-                k_decay_shared = k_shared
+                k_decay_shared = kv_scratch_shared
             # V_beta buffer
             v_beta_shared = T.alloc_shared((CHUNK_SIZE, head_dim_v_split), dtype=dtype)
             # Double-buffered V: separate prefetch buffer to give V prefetch the whole chunk to complete
@@ -211,14 +210,14 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         T.cast(k_shared[i, d], accum_dtype)
                         * exp_g_last * inv_exp_g_shared[i],
                         dtype,
-                    )
+                   )
 
                 # Scale state by exp_g_last (in registers, no shared mem traffic)
                 for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
                     state_frag[d1, d2] = state_frag[d1, d2] * exp_g_last
                 # state += K_decay_last^T @ V_new (accumulate onto pre-scaled state)
                 T.gemm(
-                    k_shared, v_new_shared, state_frag,
+                    k_decay_shared, v_new_shared, state_frag,
                     transpose_A=True, clear_accum=False,
                 )
                 # Output write (moved after state update for ILP overlap with GEMM)
