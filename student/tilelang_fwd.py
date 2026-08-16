@@ -44,7 +44,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
         final_state: T.Tensor(state_shape, dtype=accum_dtype),
         num_chunks: T.int32,
     ):
-        with T.Kernel(batch_size * H * split_v, threads=128) as (block_id,):
+        with T.Kernel(batch_size * H * split_v, threads=256) as (block_id,):
             bb = block_id // (H * split_v)
             rest = block_id % (H * split_v)
             hh = rest // split_v
