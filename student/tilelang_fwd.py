@@ -73,7 +73,8 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, head_dim_v_split), dtype=dtype)
             else:
                 kv_scratch_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
-                k_decay_shared = kv_scratch_shared
+                # k_decay modifies k_shared in-place (overwritten by next chunk's K prefetch)
+                k_decay_shared = k_shared
             # V_beta buffer
             v_beta_shared = T.alloc_shared((CHUNK_SIZE, head_dim_v_split), dtype=dtype)
             # Double-buffered V: separate prefetch buffer to give V prefetch the whole chunk to complete
