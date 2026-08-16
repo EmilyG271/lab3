@@ -112,19 +112,14 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         T.async_copy(v[bb, left:right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
                         # Wait for Q/K/A/V async copies before reading any shared data
                         T.ptx_wait_group(0)
-                        # Load g/beta synchronously and compute exp_g/inv_exp_g
+                        # Load g/beta synchronously (exp_g computed later, overlapping with GEMMs)
                         for i in T.Parallel(CHUNK_SIZE):
                             g_shared[i] = g_cumsum[bb, left + i, hh]
                             beta_shared[i] = beta[bb, left + i, hh]
-                            exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
-                            inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
                     else:
                         # Wait for Q/K/A/V/g/beta async copies (prefetched from previous chunk)
                         T.ptx_wait_group(0)
-                        # g/beta already in shared memory, compute exp_g/inv_exp_g
-                        for i in T.Parallel(CHUNK_SIZE):
-                            exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
-                            inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
+                        # g/beta already in shared memory (exp_g computed later, overlapping with GEMMs)
                     # V buffer swap for split_v=1 (after ptx_wait_group)
                     if split_v == 1:
                         if chunk_idx > 0:
@@ -151,8 +146,6 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         else:
                             g_shared[i] = g_cumsum[bb, num_tokens - 1, hh]
                             beta_shared[i] = 0
-                        exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
-                        inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
 
                 # Issue Q@K^T, K@state, and Q@state concurrently (GEMM 4 has no dependency on GEMMs 1+2)
                 T.wgmma_gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
@@ -160,6 +153,10 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 T.wgmma_gemm(q_shared, state_bf16, q_state_frag, clear_accum=True, policy=T.GemmWarpPolicy.FullRow)
                 T.warpgroup_arrive()
                 T.warpgroup_commit_batch()
+                # Compute exp_g/inv_exp_g overlapping with GEMM execution
+                for i in T.Parallel(CHUNK_SIZE):
+                    exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
+                    inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
                 # Scale state by exp_g_last while WGMMA executes (register-only, no conflict)
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
                 for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
