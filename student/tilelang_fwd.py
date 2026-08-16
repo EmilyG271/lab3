@@ -169,16 +169,20 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
                         kv_scratch_shared[i, d] = T.cast(
-                            T.cast(v_beta_shared[i, d], accum_dtype) * beta_shared[i]
-                            - u_frag[i, d] * beta_shared[i] * exp_g_shared[i],
+                            beta_shared[i] * (
+                                T.cast(v_beta_shared[i, d], accum_dtype)
+                                - u_frag[i, d] * exp_g_shared[i]
+                            ),
                             dtype,
                         )
                 else:
                     for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
                         if left + i < num_tokens:
                             kv_scratch_shared[i, d] = T.cast(
-                                T.cast(v[bb, left + i, hh, v_offset + d], accum_dtype) * beta_shared[i]
-                                - u_frag[i, d] * beta_shared[i] * exp_g_shared[i],
+                                beta_shared[i] * (
+                                    T.cast(v[bb, left + i, hh, v_offset + d], accum_dtype)
+                                    - u_frag[i, d] * exp_g_shared[i]
+                                ),
                                 dtype,
                             )
                         else:
@@ -207,9 +211,12 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         dtype,
                     )
 
-                # Prefetch K (k_shared free after K_decay, overlaps with GEMM 3)
+                # Prefetch K, Q, g, beta (all free, overlaps with GEMM 3)
                 if has_next:
                     T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_shared)
+                    T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
+                    T.async_copy(g_cumsum[bb, next_left:next_right, hh], g_shared)
+                    T.async_copy(beta[bb, next_left:next_right, hh], beta_shared)
 
                 # Wait for GEMM 3
                 T.warpgroup_wait(0)
@@ -218,12 +225,9 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 # Copy V_new to shared (GEMM 3 done)
                 T.copy(u_frag, v_new_shared)
 
-                # Prefetch A, Q, g, beta (all buffers free)
+                # Prefetch A (a_shared free after GEMM 3)
                 if has_next:
                     T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
-                    T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
-                    T.async_copy(g_cumsum[bb, next_left:next_right, hh], g_shared)
-                    T.async_copy(beta[bb, next_left:next_right, hh], beta_shared)
 
                 # Issue GEMMs 5+6 concurrently
                 T.wgmma_gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
