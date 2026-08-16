@@ -110,11 +110,16 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         T.async_copy(k[bb, left:right, hhg, 0:HEAD_DIM_K], k_shared)
                         T.async_copy(A[bb, left:right, hh, 0:CHUNK_SIZE], a_shared)
                         T.async_copy(v[bb, left:right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
-                    for i in T.Parallel(CHUNK_SIZE):
-                        g_shared[i] = g_cumsum[bb, left + i, hh]
-                        beta_shared[i] = beta[bb, left + i, hh]
-                        exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
-                        inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
+                        for i in T.Parallel(CHUNK_SIZE):
+                            g_shared[i] = g_cumsum[bb, left + i, hh]
+                            beta_shared[i] = beta[bb, left + i, hh]
+                            exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
+                            inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
+                    else:
+                        # g/beta prefetched from previous chunk, compute exp_g/inv_exp_g only
+                        for i in T.Parallel(CHUNK_SIZE):
+                            exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
+                            inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
                 else:
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                         if left + i < num_tokens:
@@ -207,10 +212,12 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 # Copy V_new to shared (GEMM 3 done, GEMM 4 still running)
                 T.copy(u_frag, v_new_shared)
 
-                # Prefetch A and Q (both buffers free, overlaps with GEMM 4)
+                # Prefetch A, Q, g, beta (all buffers free, overlaps with GEMM 4)
                 if has_next:
                     T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
                     T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
+                    T.async_copy(g_cumsum[bb, next_left:next_right, hh], g_shared)
+                    T.async_copy(beta[bb, next_left:next_right, hh], beta_shared)
 
                 # K_decay (exp_g_last already computed, state already scaled)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
