@@ -204,7 +204,23 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 # State update prep
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
 
-                # Output write (non-tail: no bounds check, tail: with bounds check)
+                # K_decay_last = K * exp_g_last * inv_exp_g (HEAD_DIM_K columns)
+                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
+                    k_decay_shared[i, d] = T.cast(
+                        T.cast(k_shared[i, d], accum_dtype)
+                        * exp_g_last * inv_exp_g_shared[i],
+                        dtype,
+                   )
+
+                # Scale state by exp_g_last (in registers, no shared mem traffic)
+                for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
+                    state_frag[d1, d2] = state_frag[d1, d2] * exp_g_last
+                # state += K_decay_last^T @ V_new (accumulate onto pre-scaled state)
+                T.gemm(
+                    k_decay_shared, v_new_shared, state_frag,
+                    transpose_A=True, clear_accum=False,
+                )
+                # Output write (moved after state update for ILP overlap with GEMM)
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
                         output[bb, left + i, hh, v_offset + d] = T.cast(
@@ -218,26 +234,9 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                                 SCALE * (exp_g_shared[i] * u_frag[i, d] + out_chunk_frag[i, d]),
                                 dtype,
                             )
-                # K_decay_last = K * exp_g_last * inv_exp_g (HEAD_DIM_K columns)
-                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
-                    k_decay_shared[i, d] = T.cast(
-                        T.cast(k_shared[i, d], accum_dtype)
-                        * exp_g_last * inv_exp_g_shared[i],
-                        dtype,
-                   )
-
                 # Prefetch K only (Q and A already prefetched earlier in pipeline)
                 if has_next:
                     T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_shared)
-
-                # Scale state by exp_g_last (in registers, no shared mem traffic)
-                for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
-                    state_frag[d1, d2] = state_frag[d1, d2] * exp_g_last
-                # state += K_decay_last^T @ V_new (accumulate onto pre-scaled state)
-                T.gemm(
-                    k_decay_shared, v_new_shared, state_frag,
-                    transpose_A=True, clear_accum=False,
-                )
                 # For split_v=2: V prefetch at end of chunk (old approach, no T.copy overhead)
                 if split_v == 2:
                     if has_next:
