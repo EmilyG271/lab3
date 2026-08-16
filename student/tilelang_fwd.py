@@ -147,9 +147,12 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                             g_shared[i] = g_cumsum[bb, num_tokens - 1, hh]
                             beta_shared[i] = 0
 
-                # Issue Q@K^T, K@state, and Q@state concurrently (GEMM 4 has no dependency on GEMMs 1+2)
-                T.wgmma_gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
+                # Issue GEMM 2 (K@state) as batch 0 (needed for kv_scratch)
                 T.wgmma_gemm(k_shared, state_bf16, u_frag, clear_accum=True, policy=T.GemmWarpPolicy.FullRow)
+                T.warpgroup_arrive()
+                T.warpgroup_commit_batch()
+                # Issue GEMMs 1, 3 (Q@K^T, Q@state) as batch 1 (independent of GEMM 2)
+                T.wgmma_gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
                 T.wgmma_gemm(q_shared, state_bf16, q_state_frag, clear_accum=True, policy=T.GemmWarpPolicy.FullRow)
                 T.warpgroup_arrive()
                 T.warpgroup_commit_batch()
@@ -161,10 +164,9 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
                 for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
                     state_frag[d1, d2] = state_frag[d1, d2] * exp_g_last
-                T.warpgroup_wait(0)
-                T.warpgroup_fence_operand(scores_frag)
+                # Wait for batch 0 only (GEMM 2 done, GEMMs 1+3 still running)
+                T.warpgroup_wait(1)
                 T.warpgroup_fence_operand(u_frag)
-                T.warpgroup_fence_operand(q_state_frag)
                 # Fused: scale K_state by beta*exp_g and compute V*beta - K_state directly
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
@@ -188,12 +190,17 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         else:
                             kv_scratch_shared[i, d] = 0
 
-                # Issue GEMM 3 async (A@kv -> u_frag), q_state already computed
+                # Issue GEMM 4 async (A@kv -> u_frag) as batch 2
                 T.wgmma_gemm(a_shared, kv_scratch_shared, u_frag, clear_accum=True)
                 T.warpgroup_arrive()
                 T.warpgroup_commit_batch()
 
-                # Scale scores while GEMM 3 executes (scores_frag ready, no conflict with kv_scratch)
+                # Wait for batch 1 (GEMMs 1, 3 done, needed for scores scaling)
+                T.warpgroup_wait(1)
+                T.warpgroup_fence_operand(scores_frag)
+                T.warpgroup_fence_operand(q_state_frag)
+
+                # Scale scores while GEMM 4 executes (scores_frag ready, no conflict with kv_scratch)
                 for i, j in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
                     if i >= j:
                         scores_shared[i, j] = T.cast(
