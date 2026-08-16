@@ -190,6 +190,16 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 T.warpgroup_arrive()
                 T.warpgroup_commit_batch()
 
+                # Scale scores while GEMM 3 executes (scores_frag ready, no conflict with kv_scratch)
+                for i, j in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
+                    if i >= j:
+                        scores_shared[i, j] = T.cast(
+                            scores_frag[i, j] * exp_g_shared[i] * inv_exp_g_shared[j],
+                            dtype,
+                        )
+                    else:
+                        scores_shared[i, j] = 0
+
                 # Wait for GEMM 3
                 T.warpgroup_wait(0)
                 T.warpgroup_fence_operand(u_frag)
@@ -202,23 +212,13 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                     T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
                     T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
 
-                # Scale scores (overlaps with GEMM 4)
-                for i, j in T.Parallel(CHUNK_SIZE, CHUNK_SIZE):
-                    if i >= j:
-                        scores_shared[i, j] = T.cast(
-                            scores_frag[i, j] * exp_g_shared[i] * inv_exp_g_shared[j],
-                            dtype,
-                        )
-                    else:
-                        scores_shared[i, j] = 0
-
                 # K_decay (exp_g_last already computed, state already scaled)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     k_decay_shared[i, d] = T.cast(
                         T.cast(k_shared[i, d], accum_dtype)
                         * exp_g_last * inv_exp_g_shared[i],
                         dtype,
-                   )
+                    )
 
                 # Issue GEMMs 5+6 concurrently
                 T.wgmma_gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
