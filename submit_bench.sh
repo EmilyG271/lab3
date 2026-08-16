@@ -4,7 +4,6 @@
 #HPC -g 1
 #HPC -t 4m
 #HPC --output bench_result.out
-#HPC --chdir hpc101-lab3
 cd ~/hpc101-lab3
 export PATH=/opt/lab3-venv/bin:$PATH
 export TILELANG_CACHE_DIR=/opt/lab3-cache/tilelang
