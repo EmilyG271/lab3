@@ -152,7 +152,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                             T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_next_shared)
 
                 # K_state = K @ state (use k_shared directly, skip K_decay shared mem write)
-                T.gemm(k_shared, state_bf16, u_frag, clear_accum=True, k_pack=2, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(k_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
                 # Fused: scale K_state by beta*exp_g and compute V*beta - K_state directly
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
@@ -173,7 +173,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                             kv_scratch_shared[i, d] = 0
 
                 # V_new = A @ (V_beta - K_state)
-                T.gemm(a_shared, kv_scratch_shared, u_frag, clear_accum=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(a_shared, kv_scratch_shared, u_frag, clear_accum=True)
                 T.copy(u_frag, v_new_shared)
 
                 # Prefetch A for next chunk (a_shared is now free)
@@ -181,10 +181,10 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                     T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
 
                 # scores = Q @ K^T  (moved earlier for ILP overlap)
-                T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True, k_pack=2, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True, k_pack=2)
 
                 # Q @ state (u_frag is now free, reuse it)
-                T.gemm(q_shared, state_bf16, u_frag, clear_accum=True, k_pack=2, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(q_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
                 # Prefetch Q for next chunk (q_shared is now free)
                 if has_next:
                     T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
@@ -199,7 +199,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         scores_shared[i, j] = 0
 
                 # output_in_chunk = scores @ V_new  (BF16 x BF16 -> FP32 frag)
-                T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
 
                 # State update prep
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
@@ -219,7 +219,6 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 T.gemm(
                     k_decay_shared, v_new_shared, state_frag,
                     transpose_A=True, clear_accum=False,
-                    policy=T.GemmWarpPolicy.FullRow,
                 )
                 # Output write (moved after state update for ILP overlap with GEMM)
                 if right <= num_tokens:
