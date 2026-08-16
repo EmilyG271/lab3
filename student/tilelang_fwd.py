@@ -23,7 +23,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
     batch_size = T.dynamic("batch_size")
     num_tokens = T.dynamic("num_tokens")
 
-    qk_shape = (batch_size, num_tokens, H, HEAD_DIM_K)
+    qk_shape = (batch_size, num_tokens, Hg, HEAD_DIM_K)
     k_shape = (batch_size, num_tokens, Hg, HEAD_DIM_K)
     v_shape = (batch_size, num_tokens, H, HEAD_DIM_V)
     gate_shape = (batch_size, num_tokens, H)
@@ -106,7 +106,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 # Load chunk data with tail handling
                 if right <= num_tokens:
                     if chunk_idx == 0:
-                        T.async_copy(q[bb, left:right, hh, 0:HEAD_DIM_K], q_shared)
+                        T.async_copy(q[bb, left:right, hhg, 0:HEAD_DIM_K], q_shared)
                         T.async_copy(k[bb, left:right, hhg, 0:HEAD_DIM_K], k_shared)
                         T.async_copy(A[bb, left:right, hh, 0:CHUNK_SIZE], a_shared)
                         T.async_copy(v[bb, left:right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
@@ -129,7 +129,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 else:
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                         if left + i < num_tokens:
-                            q_shared[i, d] = q[bb, left + i, hh, d]
+                            q_shared[i, d] = q[bb, left + i, hhg, d]
                             k_shared[i, d] = k[bb, left + i, hhg, d]
                         else:
                             q_shared[i, d] = 0
@@ -221,7 +221,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 # Prefetch K, Q, g, beta (all free, overlaps with GEMM 3)
                 if has_next:
                     T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_shared)
-                    T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
+                    T.async_copy(q[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], q_shared)
                     T.async_copy(g_cumsum[bb, next_left:next_right, hh], g_shared)
                     T.async_copy(beta[bb, next_left:next_right, hh], beta_shared)
 
@@ -288,10 +288,6 @@ def gdn_prefill_forward(
     batch_size, num_tokens, num_heads_qk, _ = q.shape
     num_heads_v = v.shape[2]
     num_chunks = tilelang.cdiv(num_tokens, CHUNK_SIZE)
-
-    # Expand Q heads for GVA (one Q/K head maps to multiple V heads)
-    if num_heads_qk != num_heads_v:
-        q = q.repeat_interleave(num_heads_v // num_heads_qk, dim=2)
 
     if initial_state is None:
         initial_state = torch.zeros(
