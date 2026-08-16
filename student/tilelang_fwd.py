@@ -110,16 +110,27 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         T.async_copy(k[bb, left:right, hhg, 0:HEAD_DIM_K], k_shared)
                         T.async_copy(A[bb, left:right, hh, 0:CHUNK_SIZE], a_shared)
                         T.async_copy(v[bb, left:right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
+                        # Wait for Q/K/A/V async copies before reading any shared data
+                        T.ptx_wait_group(0)
+                        # Load g/beta synchronously and compute exp_g/inv_exp_g
                         for i in T.Parallel(CHUNK_SIZE):
                             g_shared[i] = g_cumsum[bb, left + i, hh]
                             beta_shared[i] = beta[bb, left + i, hh]
                             exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
                             inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
                     else:
-                        # g/beta prefetched from previous chunk, compute exp_g/inv_exp_g only
+                        # Wait for Q/K/A/V/g/beta async copies (prefetched from previous chunk)
+                        T.ptx_wait_group(0)
+                        # g/beta already in shared memory, compute exp_g/inv_exp_g
                         for i in T.Parallel(CHUNK_SIZE):
                             exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
                             inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
+                    # V buffer swap for split_v=1 (after ptx_wait_group)
+                    if split_v == 1:
+                        if chunk_idx > 0:
+                            T.copy(v_next_shared, v_beta_shared)
+                        if has_next:
+                            T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_next_shared)
                 else:
                     for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                         if left + i < num_tokens:
@@ -138,24 +149,10 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                             g_shared[i] = g_cumsum[bb, left + i, hh]
                             beta_shared[i] = beta[bb, left + i, hh]
                         else:
-                            # Pad g with last valid cumsum so g_last is correct
                             g_shared[i] = g_cumsum[bb, num_tokens - 1, hh]
                             beta_shared[i] = 0
                         exp_g_shared[i] = T.exp2(g_shared[i] * LOG2E)
                         inv_exp_g_shared[i] = T.exp2(-g_shared[i] * LOG2E)
-
-                # exp(g) precomputed in g/beta load loop above
-
-                # Wait for async global memory loads (non-tail case only)
-                if right <= num_tokens:
-                    T.ptx_wait_group(0)
-                    if split_v == 1:
-                        # Double-buffered V: copy prefetched V from v_next_shared to working buffer
-                        if chunk_idx > 0:
-                            T.copy(v_next_shared, v_beta_shared)
-                        # Issue V prefetch early (into v_next_shared, has whole chunk to complete)
-                        if has_next:
-                            T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_next_shared)
 
                 # Issue Q@K^T, K@state, and Q@state concurrently (GEMM 4 has no dependency on GEMMs 1+2)
                 T.wgmma_gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
