@@ -152,7 +152,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                             T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_next_shared)
 
                 # K_state = K @ state (use k_shared directly, skip K_decay shared mem write)
-                T.gemm(k_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
+                T.gemm(k_shared, state_bf16, u_frag, clear_accum=True, k_pack=2, policy=T.GemmWarpPolicy.FullRow)
                 # Fused: scale K_state by beta*exp_g and compute V*beta - K_state directly
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
@@ -184,7 +184,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True, k_pack=2)
 
                 # Q @ state (u_frag is now free, reuse it)
-                T.gemm(q_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
+                T.gemm(q_shared, state_bf16, u_frag, clear_accum=True, k_pack=2, policy=T.GemmWarpPolicy.FullRow)
                 # Prefetch Q for next chunk (q_shared is now free)
                 if has_next:
                     T.async_copy(q[bb, next_left:next_right, hh, 0:HEAD_DIM_K], q_shared)
