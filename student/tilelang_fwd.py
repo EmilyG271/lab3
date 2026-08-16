@@ -59,8 +59,6 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
             # Input data in BF16
             q_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
             k_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
-            # Double-buffered K: separate prefetch buffer (used for split_v=1)
-            k_next_shared = T.alloc_shared((CHUNK_SIZE, HEAD_DIM_K), dtype=dtype)
             a_shared = T.alloc_shared((CHUNK_SIZE, CHUNK_SIZE), dtype=dtype)
             g_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
             beta_shared = T.alloc_shared((CHUNK_SIZE,), dtype=accum_dtype)
@@ -152,12 +150,6 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         # Issue V prefetch early (into v_next_shared, has whole chunk to complete)
                         if has_next:
                             T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_next_shared)
-                        # Double-buffered K: copy prefetched K from k_next_shared to working buffer
-                        if chunk_idx > 0:
-                            T.copy(k_next_shared, k_shared)
-                        # Issue K prefetch early (into k_next_shared, has whole chunk to complete)
-                        if has_next:
-                            T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_next_shared)
 
                 # K_state = K @ state (use k_shared directly, skip K_decay shared mem write)
                 T.gemm(k_shared, state_bf16, u_frag, clear_accum=True, k_pack=2)
@@ -235,8 +227,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                    )
 
                 # Prefetch K only (Q and A already prefetched earlier in pipeline)
-                # For split_v=1, K is double-buffered (prefetched at chunk start)
-                if has_next and split_v == 2:
+                if has_next:
                     T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_shared)
 
                 # Scale state by exp_g_last (in registers, no shared mem traffic)

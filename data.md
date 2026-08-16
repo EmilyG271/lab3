@@ -790,3 +790,24 @@ Status: PASS 8/8
 
 Decision: KEPT (current best). wide_gva_state -5.1%, deep_gva_state -3.4%. chain_equal fixed from +1.9% to +1.4% (within noise). long_low_gva and batch_split_gva improved further vs v92.
 Lesson: Conditional split_v approach works. split_v=1 gets double-buffered V (big wins on large-state cases), split_v=2 gets old approach (no T.copy overhead for short chunks).
+Lesson: Conditional split_v approach works. split_v=1 gets double-buffered V (big wins on large-state cases), split_v=2 gets old approach (no T.copy overhead for short chunks).
+
+## v94 (commit 969c745, REVERTED) - Double-buffered K prefetch (split_v=1)
+Date: 2026-08-16
+Change: Added k_next_shared buffer. K prefetch moved from end of chunk (after K_decay) to start of chunk (after ptx_wait_group). T.copy(k_next_shared, k_shared) copies prefetched K to working buffer. Only for split_v=1.
+Status: PASS 8/8
+
+| Case | v93 (ms) | v94 (ms) | Change |
+|------|----------|----------|--------|
+| short_tail_state | 0.154512 | 0.158464 | +2.6% |
+| chain_equal | 0.663568 | 0.670256 | +1.0% |
+| parallel_equal | 0.470768 | 0.471808 | +0.2% |
+| parallel_gva | 0.539744 | 0.547120 | +1.4% |
+| long_low_gva | 3.882832 | 3.923040 | +1.0% |
+| batch_split_gva | 3.096304 | 3.154304 | +1.9% |
+| wide_gva_state | 5.449216 | 5.517376 | +1.3% |
+| deep_gva_state | 6.205008 | 6.301760 | +1.6% |
+
+Decision: REVERTED (all cases worse than v93)
+Root cause: K was NOT the ptx_wait_group bottleneck. K prefetch already had enough overlap time (state_scale + state_update_GEMM + state_refresh). The second T.copy barrier at chunk start adds ~1us overhead that isn't offset by any benefit. V was the real bottleneck (fixed in v92/v93), K was fine.
+Lesson: Double-buffering has overhead (T.copy barrier + extra shared memory). Only worth it for the actual bottleneck. V was the bottleneck, K was not.
