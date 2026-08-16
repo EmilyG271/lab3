@@ -52,8 +52,7 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
             v_offset = vv * head_dim_v_split
             hhg = hh // (H // Hg) if H != Hg else hh
 
-           # State persists across chunks (FP32 for accuracy)
-            state_frag = T.alloc_fragment((HEAD_DIM_K, head_dim_v_split), dtype=accum_dtype)
+           # State in BF16 shared (frees 64 regs/thread + eliminates T.copy sync per chunk)
             state_bf16 = T.alloc_shared((HEAD_DIM_K, head_dim_v_split), dtype=dtype)
 
             # Input data in BF16
@@ -88,10 +87,9 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
             out_chunk_frag = T.alloc_fragment((CHUNK_SIZE, head_dim_v_split), dtype=accum_dtype)
             scores_frag = T.alloc_fragment((CHUNK_SIZE, CHUNK_SIZE), dtype=accum_dtype)
 
-            # Initialize state and BF16 copy
+            # Initialize state in BF16 shared memory
             for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
-                state_frag[d1, d2] = initial_state[bb, hh, d1, v_offset + d2]
-            T.copy(state_frag, state_bf16)
+                state_bf16[d1, d2] = T.cast(initial_state[bb, hh, d1, v_offset + d2], dtype)
 
             for chunk_idx in T.serial(num_chunks):
                 left = chunk_idx * CHUNK_SIZE
@@ -212,12 +210,12 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         dtype,
                    )
 
-                # Scale state by exp_g_last (in registers, no shared mem traffic)
+                # Scale state by exp_g_last (BF16 shared with FP32 intermediate)
                 for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
-                    state_frag[d1, d2] = state_frag[d1, d2] * exp_g_last
+                    state_bf16[d1, d2] = T.cast(T.cast(state_bf16[d1, d2], accum_dtype) * exp_g_last, dtype)
                 # state += K_decay_last^T @ V_new (accumulate onto pre-scaled state)
                 T.gemm(
-                    k_decay_shared, v_new_shared, state_frag,
+                    k_decay_shared, v_new_shared, state_bf16,
                     transpose_A=True, clear_accum=False,
                 )
                 # Output write (moved after state update for ILP overlap with GEMM)
@@ -241,12 +239,11 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 if split_v == 2:
                     if has_next:
                         T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_beta_shared)
-                # Refresh state_bf16 from state_frag
-                T.copy(state_frag, state_bf16)
+                # state_bf16 already updated in-place (no refresh needed)
 
             # Write final state
             for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
-                final_state[bb, hh, d1, v_offset + d2] = state_frag[d1, d2]
+                final_state[bb, hh, d1, v_offset + d2] = T.cast(state_bf16[d1, d2], accum_dtype)
 
     return kernel
 
