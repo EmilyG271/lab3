@@ -204,21 +204,17 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 # State update prep
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
 
-                # Fused: K_decay computation + state scale (saves 1 sync per chunk)
-                for idx in T.Parallel(CHUNK_SIZE * HEAD_DIM_K + HEAD_DIM_K * head_dim_v_split):
-                    if idx < CHUNK_SIZE * HEAD_DIM_K:
-                        i = idx // HEAD_DIM_K
-                        d = idx % HEAD_DIM_K
-                        k_decay_shared[i, d] = T.cast(
-                            T.cast(k_shared[i, d], accum_dtype)
-                            * exp_g_last * inv_exp_g_shared[i],
-                            dtype,
-                        )
-                    else:
-                        idx2 = idx - CHUNK_SIZE * HEAD_DIM_K
-                        d1 = idx2 // head_dim_v_split
-                        d2 = idx2 % head_dim_v_split
-                        state_frag[d1, d2] = state_frag[d1, d2] * exp_g_last
+                # K_decay_last = K * exp_g_last * inv_exp_g (HEAD_DIM_K columns)
+                for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
+                    k_decay_shared[i, d] = T.cast(
+                        T.cast(k_shared[i, d], accum_dtype)
+                        * exp_g_last * inv_exp_g_shared[i],
+                        dtype,
+                   )
+
+                # Scale state by exp_g_last (in registers, no shared mem traffic)
+                for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
+                    state_frag[d1, d2] = state_frag[d1, d2] * exp_g_last
                 # state += K_decay_last^T @ V_new (accumulate onto pre-scaled state)
                 T.gemm(
                     k_decay_shared, v_new_shared, state_frag,
