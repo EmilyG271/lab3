@@ -288,7 +288,7 @@ def gdn_prefill_forward(
         device=q.device,
     )
 
-    split_v = 2 if batch_size * num_heads_v <= 4 else 1
+    split_v = 2 if (batch_size * num_heads_v <= 4) or (batch_size * num_heads_v >= 32) else 1
     kernel = _gdn_prefill_kernel(
         num_heads_v,
         num_heads_qk,
