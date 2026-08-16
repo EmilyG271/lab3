@@ -843,3 +843,67 @@ Current best: v96 (commit a7f754f)
 Environment: hpc submit -p lab3, H800 MIG 10G, torch 2.9.0+cu130
 Next: v97 - T.annotate_min_blocks_per_sm(2), then try threads=128, then explore other ILP/memory optimizations
 ---
+
+## v97 (commit 1575af8, REVERTED) - annotate_min_blocks_per_sm(2)
+Date: 2026-08-16
+Change: Added T.annotate_min_blocks_per_sm(2) to force compiler to reduce register usage for higher occupancy.
+Status: PASS 8/8 but all cases much slower
+short_tail_state: 0.150->0.215 (+43%), parallel_equal: 0.468->0.693 (+48%), long_low_gva: 3.753->5.554 (+48%)
+Decision: REVERTED. Forced register reduction causes severe spilling.
+Lesson: The kernel is already register-optimized. Forcing min_blocks_per_sm hurts.
+
+## v98 (commit 5bef3de, REVERTED) - threads=128
+Date: 2026-08-16
+Change: Changed threads from 256 to 128.
+Status: PASS but all cases much slower
+short_tail_state: 0.150->0.244 (+62%)
+Decision: REVERTED. 128 threads = 4 warps, GEMM efficiency drops significantly.
+Lesson: 256 threads (8 warps) is optimal for the GEMM tile sizes used.
+
+## v99 (commit 759f9b6, REVERTED) - PTXAS_REGISTER_USAGE_LEVEL=0
+Date: 2026-08-16
+Change: Changed TL_PTXAS_REGISTER_USAGE_LEVEL from 1 to 0 (let compiler freely allocate registers).
+Status: PASS 8/8, mixed results vs v96
+parallel_gva: 0.531->0.517 (-2.6%), but chain_equal: 0.654->0.664 (+1.6%), long_low_gva: 3.753->3.793 (+1.1%)
+Decision: REVERTED. Level 1 (current) is better overall.
+Lesson: PTXAS level 1 provides better register allocation than level 0 for this kernel.
+
+## v100 (commit 3c411d3, REVERTED) - Disable AGGRESSIVE_SHARED_MEMORY_MERGE
+Date: 2026-08-16
+Change: Set TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE to False.
+Status: PASS 8/8, most cases worse
+long_low_gva: 3.753->3.813 (+1.6%), wide_gva_state: 5.399->5.480 (+1.5%)
+Decision: REVERTED. Shared memory merge helps.
+Lesson: Aggressive shared memory merge reduces bank conflicts / improves reuse.
+
+## v101 (commit 3affa0a, REVERTED) - Disable LOWER_LDGSTG
+Date: 2026-08-16
+Change: Set TL_ENABLE_LOWER_LDGSTG to False.
+Status: PASS 8/8, mixed within noise
+parallel_gva: 0.531->0.522 (-1.6%), batch_split_gva: 3.047->3.032 (-0.5%), but chain_equal +0.7%, long_low_gva +0.5%
+Decision: REVERTED. No consistent improvement.
+Lesson: LDGSTG lowering helps with async_copy overlap.
+
+## v102 (commit 791dbc0, REVERTED) - split_v=2 for B*Hv>=32
+Date: 2026-08-16
+Change: Extended split_v=2 to also apply when B*Hv>=32 (affects batch_split_gva, wide_gva_state, deep_gva_state).
+Status: PASS 8/8 but large cases severely degraded
+batch_split_gva: 3.047->3.799 (+24.7%), wide_gva_state: 5.399->8.010 (+48.4%), deep_gva_state: 6.106->7.905 (+29.5%)
+Decision: REVERTED. GEMM efficiency loss >> grid utilization gain.
+Lesson: split_v=2 halves the V dimension (128->64), making state_update GEMM 64x64 instead of 128x128. Tensor Core efficiency drops dramatically. Only beneficial for very small B*Hv (<=4).
+
+---
+[Report Round 27]
+Time: 2026-08-16 02:17
+Iterations v97-v102 (all REVERTED):
+- v97: annotate_min_blocks_per_sm(2) - +43% slower (register spilling)
+- v98: threads=128 - +62% slower (GEMM efficiency drop)
+- v99: PTXAS level 0 - mixed, slightly worse overall
+- v100: disable SHARED_MEMORY_MERGE - +1.5% slower on large cases
+- v101: disable LOWER_LDGSTG - mixed within noise
+- v102: split_v=2 for B*Hv>=32 - +24-48% slower on large cases (GEMM efficiency)
+Current best: v96 (commit a7f754f)
+Environment: hpc submit -p lab3, H800 MIG 10G, torch 2.9.0+cu130
+Score estimate: ~91/100 (4 small cases at/near 100-line, 4 large cases 2x above 100-line)
+Next: Need fundamentally different approach for large cases - they're bound by serial chunk iteration, not parallelism. Try reducing per-chunk overhead (fewer sync points, fused operations).
+---
