@@ -811,3 +811,35 @@ Status: PASS 8/8
 Decision: REVERTED (all cases worse than v93)
 Root cause: K was NOT the ptx_wait_group bottleneck. K prefetch already had enough overlap time (state_scale + state_update_GEMM + state_refresh). The second T.copy barrier at chunk start adds ~1us overhead that isn't offset by any benefit. V was the real bottleneck (fixed in v92/v93), K was fine.
 Lesson: Double-buffering has overhead (T.copy barrier + extra shared memory). Only worth it for the actual bottleneck. V was the bottleneck, K was not.
+
+## v96 (commit a7f754f) - 2026-08-16
+Optimization: Reorder K_decay + state_update GEMM before output write
+Change: Moved K_decay computation, state scale, and state_update GEMM (K_decay_last^T @ V_new) to BEFORE the output write (global memory store). This allows Tensor Core computation to overlap with HBM write-back latency. Also moved K prefetch to after output write (since k_shared is still needed for K_decay). For split_v=2, V prefetch also moved after output write.
+Status: PASS 8/8
+Environment: hpc submit -p lab3, NVIDIA H800 PCIe MIG 1g.10gb, torch 2.9.0+cu130, CUDA 13.3
+
+| Case | v93 (ms) | v96 (ms) | Change | 100-line (ms) | v96 vs 100-line |
+|------|----------|----------|--------|---------------|-----------------|
+| short_tail_state | 0.154512 | 0.150560 | -2.6% | 0.346048 | 43.5% (already below) |
+| chain_equal | 0.663568 | 0.653584 | -1.5% | 0.497792 | 131.3% |
+| parallel_equal | 0.470768 | 0.467616 | -0.7% | 0.511264 | 91.5% |
+| parallel_gva | 0.539744 | 0.530784 | -1.7% | 0.491552 | 108.0% |
+| long_low_gva | 3.882832 | 3.753168 | -3.3% | 1.858816 | 202.0% |
+| batch_split_gva | 3.096304 | 3.046592 | -1.6% | 1.532128 | 198.9% |
+| wide_gva_state | 5.449216 | 5.399008 | -0.9% | 2.426656 | 222.5% |
+| deep_gva_state | 6.205008 | 6.106448 | -1.6% | 2.831104 | 215.8% |
+
+Decision: KEPT. All 8 cases improved or flat. Best improvements on long_low_gva (-3.3%) and short_tail (-2.6%).
+Lesson: Reordering compute before memory store allows Tensor Core GEMM to overlap with HBM write. The effect is modest (~1-3%) because the TileLang compiler already does some scheduling, but manual reordering helps it find better instruction-level parallelism.
+Note: This was the first test using hpc submit -p lab3 (H800 MIG 10G). Previous tests (v1-v95) used the old /opt/lab3-venv environment on a different pod config.
+Note: chain_equal and parallel_gva are still above the 100-point line. The 4 large cases (long_low_gva, batch_split_gva, wide_gva_state, deep_gva_state) are 2x+ above the 100-point line - these are the main optimization targets.
+
+---
+[Report Round 26]
+Time: 2026-08-16 01:57
+Iterations: v96 (reorder K_decay + state update before output write)
+- v96: KEPT. All 8 cases improved. long_low_gva -3.3%, short_tail -2.6%, parallel_gva -1.7%, deep_gva -1.6%, chain_equal -1.5%, batch_split_gva -1.6%, wide_gva -0.9%, parallel_equal -0.7%.
+Current best: v96 (commit a7f754f)
+Environment: hpc submit -p lab3, H800 MIG 10G, torch 2.9.0+cu130
+Next: v97 - T.annotate_min_blocks_per_sm(2), then try threads=128, then explore other ILP/memory optimizations
+---
