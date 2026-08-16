@@ -222,12 +222,12 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 T.warpgroup_wait(0)
                 T.warpgroup_fence_operand(u_frag)
 
-                # Copy V_new to shared (GEMM 3 done)
-                T.copy(u_frag, v_new_shared)
-
-                # Prefetch A (a_shared free after GEMM 3)
+                # Prefetch A (non-blocking, starts before T.copy barrier)
                 if has_next:
                     T.async_copy(A[bb, next_left:next_right, hh, 0:CHUNK_SIZE], a_shared)
+
+                # Copy V_new to shared (GEMM 3 done)
+                T.copy(u_frag, v_new_shared)
 
                 # Issue GEMMs 5+6 concurrently
                 T.wgmma_gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
