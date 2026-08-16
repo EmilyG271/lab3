@@ -15,7 +15,7 @@ SCALE = HEAD_DIM_K ** -0.5
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE: True,
         tilelang.PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 1,
+        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 2,
     },
 )
 def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
