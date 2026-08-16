@@ -237,7 +237,6 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 T.gemm(
                     k_decay_shared, v_new_shared, state_frag,
                     transpose_A=True, clear_accum=False,
-                    policy=T.GemmWarpPolicy.FullCol,
                 )
                 # For split_v=2: V prefetch at end of chunk (old approach, no T.copy overhead)
                 if split_v == 2:
