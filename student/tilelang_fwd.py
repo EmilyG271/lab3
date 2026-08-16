@@ -14,7 +14,7 @@ SCALE = HEAD_DIM_K ** -0.5
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE: True,
-        tilelang.PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True,
+        tilelang.PassConfigKey.TL_ENABLE_LOWER_LDGSTG: False,
         tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 1,
     },
 )
