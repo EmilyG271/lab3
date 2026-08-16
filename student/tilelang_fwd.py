@@ -45,7 +45,6 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
         num_chunks: T.int32,
     ):
         with T.Kernel(batch_size * H * split_v, threads=256) as (block_id,):
-            T.annotate_min_blocks_per_sm(2)
             bb = block_id // (H * split_v)
             rest = block_id % (H * split_v)
             hh = rest // split_v
