@@ -151,11 +151,14 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                         if has_next:
                             T.async_copy(v[bb, next_left:next_right, hh, v_offset:v_offset + head_dim_v_split], v_next_shared)
 
-                # scores = Q @ K^T  (moved before K@state: independent GEMMs back-to-back for ILP)
-                T.gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True, k_pack=2)
-
-                # K_state = K @ state
-                T.gemm(k_shared, state_bf16, u_frag, clear_accum=True, k_pack=2, policy=T.GemmWarpPolicy.FullRow)
+                # Issue Q@K^T and K@state concurrently (async WGMMA, k_pack is ROCm-only)
+                T.wgmma_gemm(q_shared, k_shared, scores_frag, transpose_B=True, clear_accum=True)
+                T.wgmma_gemm(k_shared, state_bf16, u_frag, clear_accum=True, policy=T.GemmWarpPolicy.FullRow)
+                T.warpgroup_arrive()
+                T.warpgroup_commit_batch()
+                T.warpgroup_wait(0)
+                T.warpgroup_fence_operand(scores_frag)
+                T.warpgroup_fence_operand(u_frag)
                 # Fused: scale K_state by beta*exp_g and compute V*beta - K_state directly
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
@@ -198,13 +201,10 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                     else:
                         scores_shared[i, j] = 0
 
-                # output_in_chunk = scores @ V_new  (BF16 x BF16 -> FP32 frag)
-                T.gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
-
-                # State update prep
+                # State update prep (moved before GEMMs for concurrent issue)
                 exp_g_last = exp_g_shared[CHUNK_SIZE - 1]
 
-                # K_decay_last = K * exp_g_last * inv_exp_g (HEAD_DIM_K columns)
+                # K_decay_last = K * exp_g_last * inv_exp_g (must be before K prefetch)
                 for i, d in T.Parallel(CHUNK_SIZE, HEAD_DIM_K):
                     k_decay_shared[i, d] = T.cast(
                         T.cast(k_shared[i, d], accum_dtype)
@@ -215,12 +215,23 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                 # Scale state by exp_g_last (in registers, no shared mem traffic)
                 for d1, d2 in T.Parallel(HEAD_DIM_K, head_dim_v_split):
                     state_frag[d1, d2] = state_frag[d1, d2] * exp_g_last
-                # state += K_decay_last^T @ V_new (accumulate onto pre-scaled state)
-                T.gemm(
-                    k_decay_shared, v_new_shared, state_frag,
-                    transpose_A=True, clear_accum=False,
-                )
-                # Output write (moved after state update for ILP overlap with GEMM)
+
+                # Issue GEMMs 5+6 concurrently (both read v_new_shared, different accumulators)
+                T.wgmma_gemm(scores_shared, v_new_shared, out_chunk_frag, clear_accum=True)
+                T.wgmma_gemm(k_decay_shared, v_new_shared, state_frag, transpose_A=True, clear_accum=False)
+                T.warpgroup_arrive()
+                T.warpgroup_commit_batch()
+
+                # Prefetch K (overlaps with async GEMMs, k_shared no longer needed)
+                if has_next:
+                    T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_shared)
+
+                # Wait for both GEMMs to complete
+                T.warpgroup_wait(0)
+                T.warpgroup_fence_operand(out_chunk_frag)
+                T.warpgroup_fence_operand(state_frag)
+
+                # Output write (both accumulators ready)
                 if right <= num_tokens:
                     for i, d in T.Parallel(CHUNK_SIZE, head_dim_v_split):
                         output[bb, left + i, hh, v_offset + d] = T.cast(
@@ -234,9 +245,6 @@ def _gdn_prefill_kernel(H, Hg, split_v, dtype, accum_dtype):
                                 SCALE * (exp_g_shared[i] * u_frag[i, d] + out_chunk_frag[i, d]),
                                 dtype,
                             )
-                # Prefetch K only (Q and A already prefetched earlier in pipeline)
-                if has_next:
-                    T.async_copy(k[bb, next_left:next_right, hhg, 0:HEAD_DIM_K], k_shared)
                 # For split_v=2: V prefetch at end of chunk (old approach, no T.copy overhead)
                 if split_v == 2:
                     if has_next:
